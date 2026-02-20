@@ -5,10 +5,27 @@ import axios from 'axios';
 import { useAuth } from '@clerk/nextjs';
 import { ClerkProvider, SignedIn, UserButton } from '@clerk/nextjs';
 import Link from 'next/link';
-import { MdDashboard, MdSecurity } from 'react-icons/md';
-import { BsChatFill } from 'react-icons/bs';
-import { FaDatabase, FaBookOpen } from 'react-icons/fa';
 import { useRouter } from 'next/navigation';
+import { Sidebar, MobileSidebar } from "@/components/sidebar";
+import { ModeToggle } from "@/components/mode-toggle";
+import { ArrowLeft, CheckCircle2, XCircle, AlertCircle, AlertTriangle, Terminal, FileText, Activity, Wrench, ChevronDown, BrainCircuit, Sparkles, Loader2, ExternalLink, Trash2, Clock, Target, ListChecks, Lightbulb } from 'lucide-react';
+import dynamic from 'next/dynamic';
+import ReactMarkdown from 'react-markdown';
+import toast from 'react-hot-toast';
+
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 
 export default function IncidentDetails({ params }) {
   const resolvedParams = use(params);
@@ -16,8 +33,131 @@ export default function IncidentDetails({ params }) {
   const [incidentDetails, setIncidentDetails] = useState(null);
   const [loading, setLoading] = useState(true);
   const [results, setResults] = useState([]);
+  const [rcaReport, setRcaReport] = useState(null);
+  const [generatingRCA, setGeneratingRCA] = useState(false);
+  const [problemRecord, setProblemRecord] = useState(null);
+  const [generatingProblem, setGeneratingProblem] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const { getToken } = useAuth();
   const router = useRouter();
+
+  // Enhanced markdown renderer with code blocks and better formatting
+  const RCARenderer = ({ content }) => {
+    if (!content) return null;
+    
+    // Split content by main sections
+    const lines = content.split('\n');
+    const sections = [];
+    let currentSection = { title: '', content: [], icon: null };
+    
+    lines.forEach((line) => {
+      // Detect section headers
+      if (line.match(/^#{1,3}\s/)) {
+        if (currentSection.content.length > 0 || currentSection.title) {
+          sections.push(currentSection);
+        }
+        
+        // Determine icon based on section title
+        let icon = <FileText className="h-5 w-5" />;
+        const title = line.replace(/^#{1,3}\s/, '').toLowerCase();
+        
+        if (title.includes('summary') || title.includes('overview')) {
+          icon = <FileText className="h-5 w-5" />;
+        } else if (title.includes('timeline') || title.includes('chronolog')) {
+          icon = <Clock className="h-5 w-5" />;
+        } else if (title.includes('root cause') || title.includes('why')) {
+          icon = <Target className="h-5 w-5" />;
+        } else if (title.includes('resolution') || title.includes('recovery')) {
+          icon = <Wrench className="h-5 w-5" />;
+        } else if (title.includes('corrective') || title.includes('preventive') || title.includes('action')) {
+          icon = <ListChecks className="h-5 w-5" />;
+        } else if (title.includes('impact')) {
+          icon = <AlertCircle className="h-5 w-5" />;
+        } else if (title.includes('lesson')) {
+          icon = <Lightbulb className="h-5 w-5" />;
+        }
+        
+        currentSection = { title: line, content: [], icon };
+      } else {
+        currentSection.content.push(line);
+      }
+    });
+    if (currentSection.content.length > 0 || currentSection.title) {
+      sections.push(currentSection);
+    }
+    
+    return (
+      <div className="space-y-4">
+        {sections.map((section, idx) => (
+          <div key={idx} className="border rounded-lg overflow-hidden">
+            {/* Section Header */}
+            <div className="bg-purple-100 dark:bg-purple-900/30 px-4 py-3 border-b border-purple-200 dark:border-purple-800 flex items-center gap-2">
+              {section.icon}
+              <h2 className="font-bold text-purple-900 dark:text-purple-200 text-lg">
+                {section.title.replace(/^#+\s/, '')}
+              </h2>
+            </div>
+            {/* Section Content */}
+            <div className="bg-white dark:bg-gray-900 p-4">
+              {section.content.filter(l => l.trim()).map((line, lineIdx) => (
+                <div key={lineIdx} className="mb-2">
+                  {line.trim().startsWith('- ') || line.trim().startsWith('* ') ? (
+                    // List items with bullet
+                    <div className="flex items-start gap-2 ml-2">
+                      <span className="text-purple-600 dark:text-purple-400 mt-1">•</span>
+                      <span className="text-gray-700 dark:text-gray-300">
+                        <MarkdownLine text={line.replace(/^[-*]\s/, '')} />
+                      </span>
+                    </div>
+                  ) : line.trim().match(/^\d+\.\s/) ? (
+                    // Numbered list
+                    <div className="flex items-start gap-2 ml-2">
+                      <span className="text-purple-600 dark:text-purple-400 mt-0">{line.match(/^\d+\./)[0]}</span>
+                      <span className="text-gray-700 dark:text-gray-300">
+                        <MarkdownLine text={line.replace(/^\d+\.\s/, '')} />
+                      </span>
+                    </div>
+                  ) : (
+                    // Regular paragraph
+                    <div className="text-gray-700 dark:text-gray-300">
+                      <MarkdownLine text={line} />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  // Component to render bold and code in text
+  const MarkdownLine = ({ text }) => {
+    if (!text) return null;
+    
+    // Split by ** for bold
+    const parts = text.split(/(\*\*[^*]+\*\*)/g);
+    
+    return (
+      <>
+        {parts.map((part, idx) => {
+          if (part.startsWith('**') && part.endsWith('**')) {
+            return <strong key={idx} className="font-bold text-gray-900 dark:text-gray-100">{part.replace(/\*\*/g, '')}</strong>;
+          }
+          // Handle inline code
+          const codeParts = part.split(/(`[^`]+`)/g);
+          return codeParts.map((cp, cidx) => {
+            if (cp.startsWith('`') && cp.endsWith('`')) {
+              return <code key={`${idx}-${cidx}`} className="bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded text-purple-600 dark:text-purple-400 font-mono text-sm">{cp.replace(/`/g, '')}</code>;
+            }
+            return <span key={`${idx}-${cidx}`}>{cp}</span>;
+          });
+        })}
+      </>
+    );
+  };
 
   const parseResultDescription = (description) => {
     if (!description) return null;
@@ -33,6 +173,8 @@ export default function IncidentDetails({ params }) {
     if (slug) {
       fetchIncidentDetails(slug);
       fetchResults(slug);
+      fetchRCA(slug);
+      fetchProblemRecord();
     }
   }, [slug]);
 
@@ -69,57 +211,119 @@ export default function IncidentDetails({ params }) {
     }
   }
 
+  async function fetchRCA(incNumber) {
+    try {
+      const token = await getToken({ template: "auth_token" });
+      const { data } = await axios.get(`http://127.0.0.1:8000/getRCA/${incNumber}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      if (data.response) {
+        setRcaReport(data.response);
+      }
+    } catch (e) {
+      console.log('No existing RCA found or error:', e);
+    }
+  }
+
+  async function fetchProblemRecord() {
+    try {
+      const token = await getToken({ template: "auth_token" });
+      const { data } = await axios.get(`${process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000'}/api/v1/workflow/problems/by-incident/${slug}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (data && data.exists) {
+        setProblemRecord(data.problem);
+      }
+    } catch (e) {
+      console.log('No problem record found:', e);
+    }
+  }
+
+  async function handleGenerateRCA() {
+    setGeneratingRCA(true);
+    try {
+      const token = await getToken({ template: "auth_token" });
+      const { data } = await axios.post(`http://127.0.0.1:8000/generateRCA/${slug}`, {}, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      if (data.response && data.response.rca_content) {
+        toast.success("RCA Generated Successfully");
+        // Refresh RCA to get the saved one
+        fetchRCA(slug);
+      } else {
+        toast.error("Failed to generate RCA");
+      }
+    } catch (e) {
+      toast.error("Error generating RCA: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setGeneratingRCA(false);
+    }
+  }
+
+  async function handleCreateProblem() {
+    setGeneratingProblem(true);
+    try {
+      const token = await getToken({ template: "auth_token" });
+      const { data } = await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000'}/api/v1/workflow/problems/ai-generate?incident_number=${slug}`, {}, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (data && data.success) {
+        setProblemRecord(data.problem);
+        toast.success("Problem Record created with AI!");
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error("Failed to create problem record");
+    } finally {
+      setGeneratingProblem(false);
+    }
+  }
+
+  async function deleteProblemRecord() {
+    setDeleting(true);
+    try {
+      const token = await getToken({ template: "auth_token" });
+      const res = await axios.delete(`${process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000'}/api/v1/workflow/problems/by-incident/${slug}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      setProblemRecord(null);
+      setDeleteDialogOpen(false);
+      toast.success("Problem Record deleted");
+    } catch (e) {
+      console.error(e);
+      toast.error("Failed to delete problem record: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   if (loading) {
     return (
       <ClerkProvider>
         <SignedIn>
-          <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-            {/* Navigation Bar */}
-            <nav className="bg-white dark:bg-gray-800 shadow-sm">
-              <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                <div className="flex items-center justify-between h-16">
-                  <div className="flex items-center space-x-8">
-                    <h1 className="text-xl font-bold text-gray-900 dark:text-white">Infra.ai Dashboard</h1>
-                    <div className="hidden md:flex space-x-4">
-                      <Link href="/dashboard" className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400">
-                        <MdDashboard className="w-5 h-5 mr-2" />
-                        Dashboard
-                      </Link>
-                      <Link href="/creds" className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400">
-                        <MdSecurity className="w-5 h-5 mr-2" />
-                        Credentials
-                      </Link>
-                      <Link href="/chat" className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400">
-                        <BsChatFill className="w-5 h-5 mr-2" />
-                        Chat
-                      </Link>
-                      <Link href="/cmdb" className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400">
-                        <FaDatabase className="w-5 h-5 mr-2" />
-                        CMDB
-                      </Link>
-                      <Link href="/knowledge" className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400">
-                        <FaBookOpen className="w-5 h-5 mr-2" />
-                        Knowledge Base
-                      </Link>
-                    </div>
-                  </div>
-                  <div className="flex items-center">
-                    <UserButton 
-                      appearance={{
-                        elements: {
-                          userButtonAvatarBox: "w-10 h-10 rounded-full"
-                        }
-                      }}
-                    />
-                  </div>
+          <div className="h-full relative">
+            <div className="hidden h-full md:flex md:w-72 md:flex-col md:fixed md:inset-y-0 z-80 bg-gray-900">
+              <Sidebar />
+            </div>
+            <div className="md:hidden">
+              <MobileSidebar />
+            </div>
+            <main className="md:pl-72 pb-10">
+              <div className="px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+                <Skeleton className="h-10 w-48" />
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <Skeleton className="h-40 w-full" />
+                  <Skeleton className="h-40 w-full" />
+                  <Skeleton className="h-40 w-full" />
                 </div>
-              </div>
-            </nav>
-
-            {/* Loading State */}
-            <main className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-              <div className="flex justify-center items-center h-64">
-                <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                <Skeleton className="h-96 w-full" />
               </div>
             </main>
           </div>
@@ -135,363 +339,331 @@ export default function IncidentDetails({ params }) {
   return (
     <ClerkProvider>
       <SignedIn>
-        <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-          {/* Navigation Bar */}
-          <nav className="bg-white dark:bg-gray-800 shadow-sm">
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-              <div className="flex items-center justify-between h-16">
-                <div className="flex items-center space-x-8">
-                  <h1 className="text-xl font-bold text-gray-900 dark:text-white">Infra.ai Dashboard</h1>
-                  <div className="hidden md:flex space-x-4">
-                    <Link href="/dashboard" className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400">
-                      <MdDashboard className="w-5 h-5 mr-2" />
-                      Dashboard
-                    </Link>
-                    <Link href="/creds" className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400">
-                      <MdSecurity className="w-5 h-5 mr-2" />
-                      Credentials
-                    </Link>
-                    <Link href="/chat" className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400">
-                      <BsChatFill className="w-5 h-5 mr-2" />
-                      Chat
-                    </Link>
-                    <Link href="/cmdb" className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400">
-                      <FaDatabase className="w-5 h-5 mr-2" />
-                      CMDB
-                    </Link>
-                    <Link href="/knowledge" className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400">
-                      <FaBookOpen className="w-5 h-5 mr-2" />
-                      Knowledge Base
-                    </Link>
-                  </div>
-                </div>
-                <div className="flex items-center">
-                  <UserButton 
-                    appearance={{
-                      elements: {
-                        userButtonAvatarBox: "w-10 h-10 rounded-full"
-                      }
-                    }}
-                  />
+        <div className="h-full relative">
+          <div className="hidden h-full md:flex md:w-72 md:flex-col md:fixed md:inset-y-0 z-80 bg-gray-900">
+            <Sidebar />
+          </div>
+          <div className="md:hidden">
+            <MobileSidebar />
+          </div>
+          <main className="md:pl-72 pb-10">
+            <div className="px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+
+              <div className="md:hidden flex items-center justify-between mb-4">
+                <div className="font-bold text-lg">Infra.ai</div>
+                <div className="flex gap-2 items-center">
+                  <ModeToggle />
+                  <UserButton />
                 </div>
               </div>
-            </div>
-          </nav>
 
-          {/* Main Content */}
-          <main className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-            <div className="bg-white dark:bg-gray-800 shadow-lg rounded-lg p-6">
-              <div className="flex justify-between items-center mb-6">
-                <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Incident Details</h1>
-                <button 
-                  onClick={() => router.back()}
-                  className="px-4 py-2 bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-900 dark:text-white rounded-lg transition-colors duration-200"
-                >
-                  Back to Dashboard
-                </button>
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                  <h1 className="text-3xl font-bold tracking-tight">Incident Details</h1>
+                  <p className="text-muted-foreground mt-1">Incident #{slug}</p>
+                </div>
+                <Button variant="outline" onClick={() => router.back()} className="gap-2">
+                  <ArrowLeft className="h-4 w-4" /> Back to Dashboard
+                </Button>
               </div>
 
-              <div className="space-y-6">
-                <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-6">
-                  <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">📝 Description</h2>
-                  <p className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{description}</p>
-                </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <FileText className="h-4 w-4 text-blue-500" /> Description
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-sm text-muted-foreground whitespace-pre-wrap">{description}</p>
+                  </CardContent>
+                </Card>
 
-                <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-6">
-                  <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">🚨 Potential Cause</h2>
-                  <p className="text-gray-700 dark:text-gray-300">{cause}</p>
-                </div>
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Activity className="h-4 w-4 text-red-500" /> Potential Cause
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-sm text-muted-foreground">{cause}</p>
+                  </CardContent>
+                </Card>
 
-                <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-6">
-                  <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">🛠️ Potential Solution</h2>
-                  <p className="text-gray-700 dark:text-gray-300">{solution}</p>
-                </div>
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Wrench className="h-4 w-4 text-green-500" /> Potential Solution
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-sm text-muted-foreground">{solution}</p>
+                  </CardContent>
+                </Card>
+              </div>
 
-                
+              {/* RCA Section */}
+              <div className="space-y-4">
+                <Card className="border-purple-200 dark:border-purple-900">
+                  <CardHeader className="pb-3 bg-purple-50/50 dark:bg-purple-900/10">
+                    <div className="flex justify-between items-center">
+                      <CardTitle className="flex items-center gap-2 text-base text-purple-700 dark:text-purple-400">
+                        <BrainCircuit className="h-5 w-5" /> Root Cause Analysis (AI)
+                      </CardTitle>
+                      <div className="flex gap-2">
+                        {problemRecord ? (
+                          <>
+                            <Button 
+                              size="sm" 
+                              variant="outline" 
+                              className="gap-1 border-purple-300 text-purple-700 hover:bg-purple-100"
+                              onClick={() => router.push(`/problems/${problemRecord.id}`)}
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                              View Problem Record
+                            </Button>
+                            <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+                              <DialogTrigger asChild>
+                                <Button 
+                                  size="sm" 
+                                  variant="ghost" 
+                                  className="text-red-500 hover:text-red-700 hover:bg-red-100"
+                                  title="Delete Problem Record"
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </Button>
+                              </DialogTrigger>
+                              <DialogContent>
+                                <DialogHeader>
+                                  <DialogTitle>Delete Problem Record</DialogTitle>
+                                  <DialogDescription>
+                                    Are you sure you want to delete this problem record? This action cannot be undone.
+                                  </DialogDescription>
+                                </DialogHeader>
+                                <DialogFooter>
+                                  <Button variant="outline" onClick={() => setDeleteDialogOpen(false)}>
+                                    Cancel
+                                  </Button>
+                                  <Button variant="destructive" onClick={deleteProblemRecord} disabled={deleting}>
+                                    {deleting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                                    Delete
+                                  </Button>
+                                </DialogFooter>
+                              </DialogContent>
+                            </Dialog>
+                          </>
+                        ) : rcaReport ? (
+                          <Button 
+                            size="sm" 
+                            variant="outline" 
+                            onClick={handleCreateProblem} 
+                            disabled={generatingProblem}
+                            className="border-purple-300 text-purple-700 hover:bg-purple-100"
+                          >
+                            {generatingProblem ? (
+                              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                            ) : (
+                              <Sparkles className="mr-1 h-3 w-3" />
+                            )}
+                            Create Problem Record with AI
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="pt-6">
+                    {rcaReport ? (
+                      <RCARenderer content={rcaReport.report_content} />
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-6 gap-4 text-center">
+                        <div className="p-3 rounded-full bg-purple-100 dark:bg-purple-900/30">
+                          <Sparkles className="h-6 w-6 text-purple-600 dark:text-purple-400" />
+                        </div>
+                        <div className="space-y-1">
+                          <h3 className="font-semibold">No RCA Report Generated</h3>
+                          <p className="text-sm text-muted-foreground max-w-sm">
+                            Generate a comprehensive Root Cause Analysis report using AI based on the incident timeline and resolution steps.
+                          </p>
+                        </div>
+                        <Button
+                          onClick={handleGenerateRCA}
+                          disabled={generatingRCA}
+                          className="bg-purple-600 hover:bg-purple-700 text-white"
+                        >
+                          {generatingRCA ? (
+                            <>
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Generating Analysis...
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="mr-2 h-4 w-4" /> Generate RCA Report
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
 
-                {/* Results Section */}
-                <div className="bg-white dark:bg-gray-800 shadow-lg rounded-lg p-6">
-                  <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-4">Action Results</h2>
-                  {results.length > 0 ? (
-                    <div className="space-y-4">
-                      {results.map((result, index) => {
-                        const parsed = parseResultDescription(result.description);
-                        const diagnostics = parsed?.diagnostics?.diagnostics || [];
-                        const analysis = parsed?.analysis;
-                        const resolution = parsed?.resolution;
-                        const resolutionResults = resolution?.resolution_results || [];
-                        const knowledgeBase = parsed?.knowledge_base;
-                        const rawPlan = parsed?.diagnostics?.raw_response;
+              <div className="space-y-4">
+                <h2 className="text-xl font-semibold tracking-tight">Action Results</h2>
+                {results.length > 0 ? (
+                  <div className="space-y-6">
+                    {results.map((result, index) => {
+                      const parsed = parseResultDescription(result.description);
+                      const diagnostics = parsed?.diagnostics?.diagnostics || [];
+                      const analysis = parsed?.analysis;
+                      const resolution = parsed?.resolution;
+                      const resolutionResults = resolution?.resolution_results || [];
+                      const knowledgeBase = parsed?.knowledge_base;
+                      const allResolutionSuccessful = resolutionResults.length > 0 && resolutionResults.every((step) => step.result?.success);
 
-                        const allResolutionSuccessful =
-                          resolutionResults.length > 0 &&
-                          resolutionResults.every((step) => step.result?.success);
-
-                        return (
-                          <div key={index} className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-                            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-3">
-                              <div>
-                                <p className="text-sm text-gray-600 dark:text-gray-300">
-                                  <span className="font-medium">Executed at:</span>{' '}
-                                  {new Date(result.created_at).toLocaleString()}
-                                </p>
-                                {analysis?.root_cause && (
-                                  <p className="mt-1 text-sm text-gray-700 dark:text-gray-200">
-                                    <span className="font-semibold">Root cause:</span>{' '}
-                                    {analysis.root_cause}
-                                  </p>
-                                )}
+                      return (
+                        <Card key={index} className="overflow-hidden">
+                          <CardHeader className="bg-muted/30 pb-4">
+                            <div className="flex flex-col md:flex-row justify-between items-start gap-2">
+                              <div className="space-y-1">
+                                <CardTitle className="text-lg">Execution Record</CardTitle>
+                                <CardDescription>
+                                  Run at {new Date(result.created_at).toLocaleString()}
+                                </CardDescription>
                               </div>
                               {resolutionResults.length > 0 && (
-                                <span
-                                  className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                                    allResolutionSuccessful
-                                      ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                                      : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
-                                  }`}
-                                >
-                                  {allResolutionSuccessful ? 'All resolution steps succeeded' : 'Resolution has partial/failed steps'}
-                                </span>
+                                <Badge variant={allResolutionSuccessful ? "default" : "destructive"}>
+                                  {allResolutionSuccessful ? "Resolution Successful" : "Resolution Partial/Failed"}
+                                </Badge>
                               )}
                             </div>
-
-                            {/* If we cannot parse the description as structured JSON, fall back to raw view */}
-                            {!parsed ? (
-                              <div className="bg-white dark:bg-gray-800 rounded-lg p-4">
-                                <pre className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
-                                  {result.description}
-                                </pre>
+                          </CardHeader>
+                          <CardContent className="p-6 space-y-6">
+                            {/* Analysis Section */}
+                            {analysis && (
+                              <div className="space-y-3">
+                                <h3 className="font-semibold flex items-center gap-2">
+                                  <Activity className="h-4 w-4" /> Root Cause Analysis
+                                </h3>
+                                <div className="bg-muted/50 p-4 rounded-lg text-sm space-y-2">
+                                  <div className="grid grid-cols-1 md:grid-cols-[120px_1fr] gap-2">
+                                    <span className="font-medium text-muted-foreground">Root Cause:</span>
+                                    <span>{analysis.root_cause || "N/A"}</span>
+                                  </div>
+                                  {analysis.verification && (
+                                    <div className="grid grid-cols-1 md:grid-cols-[120px_1fr] gap-2">
+                                      <span className="font-medium text-muted-foreground">Verification:</span>
+                                      <span>{analysis.verification}</span>
+                                    </div>
+                                  )}
+                                </div>
                               </div>
-                            ) : (
-                              <div className="space-y-6">
-                                {/* Diagnostics */}
-                                {diagnostics.length > 0 && (
-                                  <section>
-                                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
-                                      Diagnostics
-                                    </h3>
-                                    <div className="space-y-3">
-                                      {diagnostics.map((step, stepIndex) => (
-                                        <div
-                                          key={stepIndex}
-                                          className="border border-gray-200 dark:border-gray-600 rounded-lg p-3 bg-gray-50 dark:bg-gray-900"
-                                        >
-                                          <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-2">
-                                            <div className="flex-1">
-                                              <p className="text-sm font-medium text-gray-900 dark:text-white">
-                                                Step {stepIndex + 1}: {step.step}
-                                              </p>
-                                              {step.command && (
-                                                <p className="mt-1 text-xs font-mono bg-gray-900 text-gray-100 rounded px-2 py-1 overflow-x-auto">
-                                                  {step.command}
-                                                </p>
-                                              )}
-                                            </div>
-                                            <div className="flex items-center gap-2">
-                                              <span
-                                                className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                                                  step.success
-                                                    ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                                                    : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
-                                                }`}
-                                              >
-                                                {step.success ? 'Success' : 'Failed'}
-                                              </span>
-                                              <span
-                                                className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                                                  step.verified
-                                                    ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
-                                                    : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
-                                                }`}
-                                              >
-                                                {step.verified ? 'Verified' : 'Needs review'}
-                                              </span>
+                            )}
+
+                            {/* Diagnostic Steps Custom Accordion */}
+                            {diagnostics.length > 0 && (
+                              <div className="w-full border rounded-lg">
+                                <details className="group">
+                                  <summary className="flex items-center cursor-pointer px-4 py-4 font-semibold hover:bg-muted/50 list-none">
+                                    <span className="flex items-center gap-2 flex-1">
+                                      <Terminal className="h-4 w-4" /> Diagnostic Steps ({diagnostics.length})
+                                    </span>
+                                    <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
+                                  </summary>
+                                  <div className="px-4 pb-4 border-t">
+                                    <div className="space-y-3 pt-4">
+                                      {diagnostics.map((step, i) => (
+                                        <div key={i} className="border rounded-md p-3 bg-card text-sm space-y-2">
+                                          <div className="flex justify-between items-start">
+                                            <span className="font-medium">Step {i + 1}: {step.step}</span>
+                                            <div className="flex gap-2">
+                                              {step.success ?
+                                                <Badge variant="secondary" className="bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 hover:bg-green-100">Success</Badge> :
+                                                <Badge variant="destructive">Failed</Badge>
+                                              }
                                             </div>
                                           </div>
-
-                                          {step.expected_output && (
-                                            <p className="mt-2 text-xs text-gray-600 dark:text-gray-300">
-                                              <span className="font-semibold">Expected:</span> {step.expected_output}
-                                            </p>
+                                          {step.command && (
+                                            <div className="font-mono text-xs bg-muted p-2 rounded overflow-x-auto">
+                                              $ {step.command}
+                                            </div>
                                           )}
 
                                           {(step.output || step.error) && (
-                                            <details className="mt-2 text-xs">
-                                              <summary className="cursor-pointer text-blue-600 dark:text-blue-400 hover:underline">
-                                                View command output
-                                              </summary>
-                                              {step.output && (
-                                                <pre className="mt-2 whitespace-pre-wrap font-mono bg-gray-900 text-gray-100 rounded p-2 overflow-x-auto">
-                                                  {step.output}
-                                                </pre>
-                                              )}
-                                              {step.error && (
-                                                <pre className="mt-2 whitespace-pre-wrap font-mono bg-red-900 text-red-100 rounded p-2 overflow-x-auto">
-                                                  {step.error}
-                                                </pre>
-                                              )}
+                                            <details className="text-xs group/output">
+                                              <summary className="cursor-pointer text-primary hover:underline w-fit">Show Output</summary>
+                                              <div className="mt-2 font-mono bg-black text-gray-50 p-2 rounded overflow-x-auto max-h-40">
+                                                {step.output || step.error}
+                                              </div>
                                             </details>
                                           )}
                                         </div>
                                       ))}
                                     </div>
-                                  </section>
-                                )}
-
-                                {/* Analysis / RCA */}
-                                {analysis && (
-                                  <section>
-                                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
-                                      Root Cause Analysis
-                                    </h3>
-                                    {analysis.root_cause && (
-                                      <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">
-                                        {analysis.root_cause}
-                                      </p>
-                                    )}
-                                    {Array.isArray(analysis.resolution_steps) && analysis.resolution_steps.length > 0 && (
-                                      <div className="mt-2">
-                                        <h4 className="text-sm font-semibold text-gray-900 dark:text-white mb-1">
-                                          Recommended resolution steps
-                                        </h4>
-                                        <ol className="list-decimal list-inside space-y-1 text-sm text-gray-700 dark:text-gray-300">
-                                          {analysis.resolution_steps.map((stepText, i) => (
-                                            <li key={i}>{stepText}</li>
-                                          ))}
-                                        </ol>
-                                      </div>
-                                    )}
-                                    {analysis.verification && (
-                                      <p className="mt-2 text-sm text-gray-700 dark:text-gray-300">
-                                        <span className="font-semibold">Verification:</span> {analysis.verification}
-                                      </p>
-                                    )}
-                                  </section>
-                                )}
-
-                                {/* Resolution execution */}
-                                {resolutionResults.length > 0 && (
-                                  <section>
-                                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
-                                      Resolution execution
-                                    </h3>
-                                    <div className="space-y-3">
-                                      {resolutionResults.map((step, stepIndex) => {
-                                        const stepResult = step.result || {};
-                                        return (
-                                          <div
-                                            key={stepIndex}
-                                            className="border border-gray-200 dark:border-gray-600 rounded-lg p-3 bg-gray-50 dark:bg-gray-900"
-                                          >
-                                            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-2">
-                                              <div className="flex-1">
-                                                <p className="text-sm font-medium text-gray-900 dark:text-white">
-                                                  Step {stepIndex + 1}: {step.step}
-                                                </p>
-                                                {step.command && (
-                                                  <p className="mt-1 text-xs font-mono bg-gray-900 text-gray-100 rounded px-2 py-1 overflow-x-auto">
-                                                    {step.command}
-                                                  </p>
-                                                )}
-                                              </div>
-                                              <span
-                                                className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                                                  stepResult.success
-                                                    ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                                                    : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
-                                                }`}
-                                              >
-                                                {stepResult.success ? 'Succeeded' : 'Failed'}
-                                              </span>
-                                            </div>
-
-                                            {(stepResult.output || stepResult.error) && (
-                                              <details className="mt-2 text-xs">
-                                                <summary className="cursor-pointer text-blue-600 dark:text-blue-400 hover:underline">
-                                                  View command output
-                                                </summary>
-                                                {stepResult.output && (
-                                                  <pre className="mt-2 whitespace-pre-wrap font-mono bg-gray-900 text-gray-100 rounded p-2 overflow-x-auto">
-                                                    {stepResult.output}
-                                                  </pre>
-                                                )}
-                                                {stepResult.error && (
-                                                  <pre className="mt-2 whitespace-pre-wrap font-mono bg-red-900 text-red-100 rounded p-2 overflow-x-auto">
-                                                    {stepResult.error}
-                                                  </pre>
-                                                )}
-                                              </details>
-                                            )}
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  </section>
-                                )}
-
-                                {/* Knowledge base context */}
-                                {knowledgeBase && (
-                                  <section>
-                                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
-                                      Knowledge base context
-                                    </h3>
-                                    <p className="text-sm text-gray-700 dark:text-gray-300">
-                                      <span className="font-semibold">Runbook used:</span>{' '}
-                                      {knowledgeBase.has_knowledge ? 'Yes, based on internal SOPs/runbooks' : 'No specific runbook found'}
-                                    </p>
-                                    {knowledgeBase.has_knowledge && Array.isArray(knowledgeBase.matches) && knowledgeBase.matches.length > 0 && (
-                                      <div className="mt-2 text-sm text-gray-700 dark:text-gray-300">
-                                        <h4 className="text-sm font-semibold text-gray-900 dark:text-white mb-1">
-                                          Top matching documents
-                                        </h4>
-                                        <ul className="list-disc list-inside space-y-1">
-                                          {knowledgeBase.matches.slice(0, 3).map((match, i) => (
-                                            <li key={i}>
-                                              {match.source || 'Unknown source'}{' '}
-                                              {typeof match.score === 'number' && `· score ${(match.score * 100).toFixed(1)}%`}
-                                            </li>
-                                          ))}
-                                        </ul>
-                                      </div>
-                                    )}
-                                    {knowledgeBase.has_knowledge && knowledgeBase.combined_context && (
-                                      <details className="mt-2 text-xs">
-                                        <summary className="cursor-pointer text-blue-600 dark:text-blue-400 hover:underline">
-                                          View full runbook context
-                                        </summary>
-                                        <pre className="mt-2 whitespace-pre-wrap font-mono bg-gray-900 text-gray-100 rounded p-2 overflow-x-auto max-h-64">
-                                          {knowledgeBase.combined_context}
-                                        </pre>
-                                      </details>
-                                    )}
-                                  </section>
-                                )}
-
-                                {/* Raw plan JSON for debugging/traceability */}
-                                {rawPlan && (
-                                  <section>
-                                    <details className="text-xs">
-                                      <summary className="cursor-pointer text-blue-600 dark:text-blue-400 hover:underline">
-                                        View original diagnostic plan JSON
-                                      </summary>
-                                      <pre className="mt-2 whitespace-pre-wrap font-mono bg-gray-900 text-gray-100 rounded p-2 overflow-x-auto max-h-64">
-                                        {typeof rawPlan === 'string' ? rawPlan : JSON.stringify(rawPlan, null, 2)}
-                                      </pre>
-                                    </details>
-                                  </section>
-                                )}
+                                  </div>
+                                </details>
                               </div>
                             )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="text-center py-8">
-                      <p className="text-gray-500 dark:text-gray-400">No results found for this incident</p>
-                    </div>
-                  )}
-                </div>
+
+                            {/* Resolution Steps Custom Accordion */}
+                            {resolutionResults.length > 0 && (
+                              <div className="w-full border rounded-lg">
+                                <details className="group">
+                                  <summary className="flex items-center cursor-pointer px-4 py-4 font-semibold hover:bg-muted/50 list-none">
+                                    <span className="flex items-center gap-2 flex-1">
+                                      <Wrench className="h-4 w-4" /> Resolution Steps ({resolutionResults.length})
+                                    </span>
+                                    <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
+                                  </summary>
+                                  <div className="px-4 pb-4 border-t">
+                                    <div className="space-y-3 pt-4">
+                                      {resolutionResults.map((step, i) => (
+                                        <div key={i} className="border rounded-md p-3 bg-card text-sm space-y-2">
+                                          <div className="flex justify-between items-start">
+                                            <span className="font-medium">Step {i + 1}: {step.step}</span>
+                                            <Badge variant={step.result?.success ? "default" : "destructive"}>
+                                              {step.result?.success ? "Success" : "Failed"}
+                                            </Badge>
+                                          </div>
+                                          {step.command && (
+                                            <div className="font-mono text-xs bg-muted p-2 rounded overflow-x-auto">
+                                              $ {step.command}
+                                            </div>
+                                          )}
+                                          {(step.result?.output || step.result?.error) && (
+                                            <details className="text-xs">
+                                              <summary className="cursor-pointer text-primary hover:underline w-fit">Show Output</summary>
+                                              <div className="mt-2 font-mono bg-black text-gray-50 p-2 rounded overflow-x-auto max-h-40">
+                                                {step.result?.output || step.result?.error}
+                                              </div>
+                                            </details>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </details>
+                              </div>
+                            )}
+
+                            {/* Fallback for unstructured description */}
+                            {!parsed && (
+                              <div className="bg-muted p-4 rounded-md text-sm whitespace-pre-wrap font-mono">
+                                {result.description}
+                              </div>
+                            )}
+
+                          </CardContent>
+                        </Card>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <Card className="bg-muted/50 border-dashed">
+                    <CardContent className="flex flex-col items-center justify-center py-10 text-muted-foreground">
+                      <Activity className="h-10 w-10 mb-4 opacity-20" />
+                      <p>No action results found for this incident.</p>
+                    </CardContent>
+                  </Card>
+                )}
               </div>
             </div>
           </main>

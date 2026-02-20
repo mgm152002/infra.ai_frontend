@@ -1,17 +1,21 @@
 'use client'
 import Link from "next/link";
-import { MdDashboard, MdSecurity } from "react-icons/md";
-import { IoIosRefresh } from "react-icons/io";
 import { useRouter } from "next/navigation";
 import { useAuth } from '@clerk/nextjs';
 import { ClerkProvider, SignedIn } from '@clerk/nextjs';
 import axios from "axios";
 import { useEffect, useState } from "react";
-import { FaDatabase, FaBookOpen } from "react-icons/fa";
-import { BsChatFill } from "react-icons/bs";
 import { UserButton } from "@clerk/nextjs";
-import { Toaster, toast } from 'react-hot-toast';
+import { toast } from 'react-hot-toast';
 import dynamic from 'next/dynamic';
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
+import { Sidebar, MobileSidebar } from "@/components/sidebar";
+import { ModeToggle } from "@/components/mode-toggle";
 
 // Dynamically import Toaster with no SSR
 const ToasterComponent = dynamic(
@@ -30,12 +34,19 @@ export default function Dashboard() {
   const [actionResponses, setActionResponses] = useState({});
   const [plans, setPlans] = useState({});
   const [showPlanModal, setShowPlanModal] = useState(false);
-  const [selectedIncident, setSelectedIncident] = useState(null);
+  const [activeJobs, setActiveJobs] = useState([]);
 
-  const getClerkToken = async () => {
-    const t = await getToken({ template: "auth_token" });
-    setToken(t);
-  };
+  // Create Incident State
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createLoading, setCreateLoading] = useState(false);
+  const [alertTypes, setAlertTypes] = useState([]);
+  const [newIncidentData, setNewIncidentData] = useState({
+    short_description: "",
+    tag_id: "",
+    alert_type_id: ""
+  });
+
+  const [selectedIncident, setSelectedIncident] = useState(null);
 
   async function getInc() {
     try {
@@ -56,17 +67,86 @@ export default function Dashboard() {
     }
   }
 
-  useEffect(() => {
-    async function getIncidents() {
-      if (!token) {
-        await getClerkToken();
-      }
-      if (token) {
-        await getInc();
-      }
+  async function getActiveJobs() {
+    if (!token) return;
+    try {
+      const { data } = await axios.get('http://127.0.0.1:8000/jobs/active', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setActiveJobs(data.response || []);
+    } catch (error) {
+      console.error("Error fetching active jobs:", error);
     }
-    getIncidents();
+  }
+
+  async function getAlertTypes() {
+    if (!token) return;
+    try {
+      const { data } = await axios.get('http://127.0.0.1:8000/alert-types', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setAlertTypes(data.response || []);
+    } catch (error) {
+      console.error("Error fetching alert types:", error);
+    }
+  }
+
+  // Initialize token from Clerk and fetch incidents
+  useEffect(() => {
+    const initToken = async () => {
+      const t = await getToken();
+      console.log('[DEBUG] Token from Clerk:', t ? `${t.substring(0, 50)}...` : 'null');
+      setToken(t);
+    };
+    initToken();
+  }, [getToken]);
+
+  // Fetch incidents when token becomes available
+  useEffect(() => {
+    if (token) {
+      getInc();
+      getAlertTypes();
+    }
   }, [token]);
+
+  useEffect(() => {
+    let interval;
+    if (token) {
+      getActiveJobs();
+      interval = setInterval(getActiveJobs, 3000); // Poll every 3 seconds
+    }
+    return () => clearInterval(interval);
+  }, [token]);
+
+  const handleCreateIncident = async () => {
+    if (!newIncidentData.short_description) {
+      toast.error("Description is required");
+      return;
+    }
+
+    try {
+      setCreateLoading(true);
+      await axios.post('http://127.0.0.1:8000/incidents/add', {
+        short_description: newIncidentData.short_description,
+        tag_id: newIncidentData.tag_id,
+        alert_type_id: newIncidentData.alert_type_id ? parseInt(newIncidentData.alert_type_id) : null,
+        state: "Queued",
+        source: "manual"
+      }, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      toast.success("Incident created successfully");
+      setShowCreateModal(false);
+      setNewIncidentData({ short_description: "", tag_id: "", alert_type_id: "" });
+      getInc(); // Refresh list
+    } catch (error) {
+      console.error("Error creating incident:", error);
+      toast.error("Failed to create incident");
+    } finally {
+      setCreateLoading(false);
+    }
+  };
 
   const handleTakeAction = async (incident) => {
     try {
@@ -104,9 +184,8 @@ export default function Dashboard() {
       const planResponse = await axios.post(
         'http://127.0.0.1:8000/plan',
         {
-          content: `Take action on incident: ${incident.short_description}. IP Address: ${
-            cmdbItem.ip || 'N/A'
-          }, OS: ${cmdbItem.os || 'N/A'}`,
+          content: `Take action on incident: ${incident.short_description}. IP Address: ${cmdbItem.ip || 'N/A'
+            }, OS: ${cmdbItem.os || 'N/A'}`,
         },
         {
           headers: {
@@ -191,23 +270,29 @@ export default function Dashboard() {
     }
   };
 
-  // --- Dashboard helpers and derived state ---
-  const getStateBadgeClasses = (state) => {
-    const s = (state || '').toLowerCase();
-    if (s === 'processing' || s === 'inprogress' || s === 'active') {
-      return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200';
+  const handleCloseModal = (open) => {
+    if (!open) {
+      setShowPlanModal(false);
+      setSelectedIncident(null);
+      setExecuteLoading(false);
     }
-    if (s === 'resolved' || s === 'completed') {
-      return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200';
-    }
-    if (s === 'partially resolved' || s === 'partially_resolved') {
-      return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200';
-    }
-    if (s === 'error') {
-      return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200';
-    }
-    return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200';
   };
+
+  // --- Dashboard helpers and derived state ---
+  const getStateBadgeVariant = (state) => {
+    const s = (state || '').toLowerCase();
+    if (s === 'processing' || s === 'inprogress' || s === 'active') return 'default'; // Blueish usually
+    if (s === 'resolved' || s === 'completed') return 'secondary'; // Greenish ideally, or we use className
+    if (s === 'error') return 'destructive';
+    return 'outline';
+  };
+
+  const getStateBadgeClass = (state) => {
+    const s = (state || '').toLowerCase();
+    if (s === 'resolved' || s === 'completed') return 'bg-green-100 text-green-800 hover:bg-green-200 border-green-200';
+    if (s === 'partially resolved') return 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200 border-yellow-200';
+    return '';
+  }
 
   const getStateProgress = (state) => {
     const s = (state || '').toLowerCase();
@@ -234,329 +319,341 @@ export default function Dashboard() {
   return (
     <ClerkProvider>
       <SignedIn>
-        <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-          <ToasterComponent position="top-center" />
+        <div className="h-full relative">
+          <div className="hidden h-full md:flex md:w-72 md:flex-col md:fixed md:inset-y-0 z-80 bg-gray-900">
+            <Sidebar />
+          </div>
 
-          {/* Navigation Bar */}
-          <nav className="bg-white dark:bg-gray-800 shadow-sm">
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-              <div className="flex justify-between h-16">
-                <div className="flex items-center space-x-8">
-                  <h1 className="text-xl font-bold text-gray-900 dark:text-white">Infra.ai Dashboard</h1>
-                  <div className="hidden md:flex space-x-4">
-                    <Link
-                      href="/dashboard"
-                      className="flex items-center px-3 py-2 text-sm font-medium text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400"
-                    >
-                      <MdDashboard className="w-5 h-5 mr-2" />
-                      Dashboard
-                    </Link>
-                    <Link
-                      href="/creds"
-                      className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400"
-                    >
-                      <MdSecurity className="w-5 h-5 mr-2" />
-                      Credentials
-                    </Link>
-                    <Link
-                      href="/chat"
-                      className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400"
-                    >
-                      <BsChatFill className="w-5 h-5 mr-2" />
-                      Chat
-                    </Link>
-                    <Link
-                      href="/cmdb"
-                      className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400"
-                    >
-                      <FaDatabase className="w-5 h-5 mr-2" />
-                      CMDB
-                    </Link>
-                    <Link
-                      href="/knowledge"
-                      className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400"
-                    >
-                      <FaBookOpen className="w-5 h-5 mr-2" />
-                      Knowledge Base
-                    </Link>
-                  </div>
-                </div>
-                <div className="flex items-center space-x-4">
-                  <button
-                    onClick={getInc}
-                    className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400"
-                  >
-                    <IoIosRefresh className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
-                  </button>
-                  <UserButton
-                    appearance={{
-                      elements: {
-                        userButtonAvatarBox: "w-10 h-10 rounded-full",
-                      },
-                    }}
-                  />
+          <div className="md:hidden">
+            <MobileSidebar />
+          </div>
+
+          <main className="md:pl-72 pb-10">
+            <div className="px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+              <ToasterComponent position="top-center" />
+
+              <div className="md:hidden flex items-center justify-between mb-6">
+                <Link href="/dashboard">
+                  <h1 className="text-xl font-bold bg-gradient-to-r from-primary to-purple-600 bg-clip-text text-transparent">Infra.ai</h1>
+                </Link>
+                <div className="flex gap-2 items-center">
+                  <ModeToggle />
+                  <UserButton />
                 </div>
               </div>
-            </div>
-          </nav>
 
-          {/* Main Content */}
-          <main className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-            {/* Active incident & incident overview visualization */}
-            <section className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-              <div className="bg-white dark:bg-gray-800 shadow-lg rounded-lg p-6 lg:col-span-2">
-                <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-3 flex items-center justify-between">
-                  <span>Current incident in progress</span>
-                  {currentProcessingIncident && (
-                    <span className={`px-2 py-1 rounded-full text-xs ${getStateBadgeClasses(currentProcessingIncident.state)}`}>
-                      {currentProcessingIncident.state}
-                    </span>
-                  )}
-                </h2>
-                {currentProcessingIncident ? (
-                  <div className="space-y-4">
-                    <div>
-                      <p className="text-sm text-gray-700 dark:text-gray-300 font-medium mb-1">
-                        {currentProcessingIncident.short_description}
-                      </p>
-                      <p className="text-xs text-gray-500 dark:text-gray-400">
-                        Incident {currentProcessingIncident.inc_number} · Tag {currentProcessingIncident.tag_id}
-                      </p>
-                    </div>
-                    <div className="mt-4">
-                      <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
-                        <span>New</span>
-                        <span>Processing</span>
-                        <span>Verification</span>
-                        <span>Resolved</span>
-                      </div>
-                      <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 overflow-hidden">
-                        <div
-                          className="h-2 bg-gradient-to-r from-blue-500 via-indigo-500 to-emerald-500 rounded-full transition-all duration-500"
-                          style={{ width: `${getStateProgress(currentProcessingIncident.state)}%` }}
-                        ></div>
-                      </div>
-                      <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                        Progress is inferred from the incident state. As the backend worker moves the
-                        incident through diagnostics and resolution, this bar will advance.
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm text-gray-600 dark:text-gray-300">
-                      No incident is currently in the <span className="font-semibold">Processing</span> state.
-                    </p>
-                    <span className="text-xs text-gray-400 dark:text-gray-500">
-                      Waiting for new incidents from queue
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              <div className="bg-white dark:bg-gray-800 shadow-lg rounded-lg p-6">
-                <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">
-                  Incident status overview
-                </h2>
-                <div className="space-y-3">
-                  {Object.entries(stateSummary).map(([state, count]) => {
-                    const percentage = Math.round((count / totalIncidents) * 100);
-                    return (
-                      <div key={state} className="space-y-1">
-                        <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
-                          <span>{state}</span>
-                          <span>
-                            {count} · {percentage}%
-                          </span>
-                        </div>
-                        <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
-                          <div
-                            className="h-1.5 bg-blue-500 dark:bg-blue-400 rounded-full"
-                            style={{ width: `${percentage}%` }}
-                          ></div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {incidents.length === 0 && (
-                    <p className="text-xs text-gray-500 dark:text-gray-400">
-                      No incidents found yet. Once incidents are ingested, their lifecycle state will
-                      be visualized here.
-                    </p>
-                  )}
+              <div className="flex justify-between items-center">
+                <h2 className="text-3xl font-bold tracking-tight">Dashboard</h2>
+                <div className="flex gap-2">
+                  <Button onClick={getInc} disabled={loading} variant="outline">
+                    Refresh Incidents
+                  </Button>
+                  <Button onClick={() => setShowCreateModal(true)}>
+                    Create Incident
+                  </Button>
                 </div>
               </div>
-            </section>
 
-            <div className="grid grid-cols-1 gap-6">
-              {loading ? (
-                // Loading skeleton
-                Array.from({ length: 3 }).map((_, index) => (
-                  <div
-                    key={index}
-                    className="bg-white dark:bg-gray-800 shadow-lg rounded-lg p-6 animate-pulse"
-                  >
-                    <div className="h-6 bg-gray-200 dark:bg-gray-700 rounded w-3/4 mb-4"></div>
-                    <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded w-full mb-2"></div>
-                    <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded w-5/6 mb-2"></div>
-                    <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded w-2/3"></div>
-                  </div>
-                ))
-              ) : (
-                incidents.map((incident) => (
-                  <div
-                    key={incident.id}
-                    className="bg-white dark:bg-gray-800 shadow-lg rounded-lg p-6 hover:shadow-xl transition-shadow duration-200"
-                  >
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
-                          {incident.short_description}
-                        </h2>
-                        <div className="space-y-2">
-                          <p className="text-sm text-gray-600 dark:text-gray-300">
-                            <span className="font-medium">Incident Number:</span> {incident.inc_number}
-                          </p>
-                          <p className="text-sm text-gray-600 dark:text-gray-300">
-                            <span className="font-medium">State:</span>
-                            <span
-                              className={`ml-2 px-2 py-1 rounded-full text-xs ${getStateBadgeClasses(
-                                incident.state,
-                              )}`}
-                            >
-                              {incident.state || 'Unknown'}
-                            </span>
-                          </p>
-                          <p className="text-sm text-gray-600 dark:text-gray-300">
-                            <span className="font-medium">Tag ID:</span> {incident.tag_id}
-                          </p>
-                          <p className="text-sm text-gray-600 dark:text-gray-300">
-                            <span className="font-medium">Created:</span>{' '}
-                            {new Date(incident.created_at).toLocaleString()}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex flex-col space-y-2">
-                        <button
-                          onClick={() => router.push(`/Details/${incident.inc_number}`)}
-                          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors duration-200"
-                        >
-                          Details
-                        </button>
-                        <button
-                          onClick={() => handleTakeAction(incident)}
-                          disabled={actionLoading === incident.id}
-                          className={`px-4 py-2 rounded-lg transition-colors duration-200 ${
-                            actionLoading === incident.id
-                              ? 'bg-gray-300 dark:bg-gray-600 cursor-not-allowed'
-                              : 'bg-green-600 hover:bg-green-700 text-white'
-                          }`}
-                        >
-                          {actionLoading === incident.id ? (
-                            <div className="flex items-center">
-                              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                              Taking Action...
-                            </div>
-                          ) : (
-                            'Take Action'
+              {/* Active Background Jobs Section */}
+              {activeJobs.length > 0 && (
+                <section>
+                  <Card className="border-blue-200 bg-blue-50/50 dark:bg-blue-900/10 shadow-sm">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-lg flex items-center gap-2">
+                        <div className="h-2 w-2 rounded-full bg-blue-500 animate-pulse"></div>
+                        Active Background Tasks
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {activeJobs.map(job => (
+                        <div key={job.id} className="space-y-2">
+                          <div className="flex justify-between text-sm">
+                            <span className="font-medium capitalize">{job.task_type.replace('_', ' ')}</span>
+                            <span className="text-muted-foreground">{job.status} ({job.progress}%)</span>
+                          </div>
+                          <Progress value={job.progress} className="h-2" />
+                          {job.details?.step && (
+                            <p className="text-xs text-muted-foreground capitalize">Current Step: {job.details.step.replace(/_/g, ' ')}</p>
                           )}
-                        </button>
-                      </div>
-                    </div>
+                          {job.details?.stage && (
+                            <p className="text-xs text-muted-foreground capitalize">Stage: {job.details.stage.replace(/_/g, ' ')}</p>
+                          )}
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                </section>
+              )}
 
-                    {/* Simple per-incident progress bar */}
-                    <div className="mt-4">
-                      <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
-                        <div
-                          className="h-1.5 bg-blue-500 dark:bg-blue-400 rounded-full"
-                          style={{ width: `${getStateProgress(incident.state)}%` }}
-                        ></div>
-                      </div>
-                    </div>
+              {/* Active incident & incident overview visualization */}
 
-                    {actionResponses[incident.id] && (
-                      <div className="mt-4 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
-                        <h3 className="text-sm font-medium text-gray-900 dark:text-white mb-2">
-                          Action Response:
-                        </h3>
-                        <p className="text-sm text-gray-700 dark:text-gray-300">
-                          {actionResponses[incident.id]}
+              <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <Card className="lg:col-span-2 border-primary/10 shadow-sm">
+                  <CardHeader>
+                    <div className="flex items-center justify-between">
+                      <CardTitle>Current incident in progress</CardTitle>
+                      {currentProcessingIncident && (
+                        <Badge variant={getStateBadgeVariant(currentProcessingIncident.state)} className={getStateBadgeClass(currentProcessingIncident.state)}>
+                          {currentProcessingIncident.state}
+                        </Badge>
+                      )}
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    {currentProcessingIncident ? (
+                      <div className="space-y-6">
+                        <div>
+                          <p className="text-lg font-medium mb-1">
+                            {currentProcessingIncident.short_description}
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            Incident {currentProcessingIncident.inc_number} · Tag {currentProcessingIncident.tag_id}
+                          </p>
+                        </div>
+                        <div className="space-y-2">
+                          <div className="flex justify-between text-xs text-muted-foreground">
+                            <span>New</span>
+                            <span>Processing</span>
+                            <span>Verification</span>
+                            <span>Resolved</span>
+                          </div>
+                          <Progress value={getStateProgress(currentProcessingIncident.state)} className="h-2" />
+                          <p className="text-xs text-muted-foreground">
+                            Progress is inferred from the incident state. As the backend worker moves the
+                            incident through diagnostics and resolution, this bar will advance.
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between py-4">
+                        <p className="text-sm text-muted-foreground">
+                          No incident is currently in the <span className="font-semibold text-foreground">Processing</span> state.
                         </p>
+                        <span className="text-xs text-muted-foreground bg-secondary/50 px-2 py-1 rounded">
+                          Waiting for new incidents
+                        </span>
                       </div>
                     )}
-                  </div>
-                ))
-              )}
+                  </CardContent>
+                </Card>
+
+                <Card className="border-primary/10 shadow-sm">
+                  <CardHeader>
+                    <CardTitle>Incident status overview</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {Object.entries(stateSummary).map(([state, count]) => {
+                      const percentage = Math.round((count / totalIncidents) * 100);
+                      return (
+                        <div key={state} className="space-y-2">
+                          <div className="flex justify-between text-xs text-muted-foreground">
+                            <span className="font-medium text-foreground">{state}</span>
+                            <span>
+                              {count} · {percentage}%
+                            </span>
+                          </div>
+                          <Progress value={percentage} className="h-1.5" indicatorClassName={
+                            state.toLowerCase().includes('resolved') ? "bg-green-500" :
+                              state.toLowerCase().includes('processing') ? "bg-blue-500" :
+                                "bg-primary"
+                          } />
+                        </div>
+                      );
+                    })}
+                    {incidents.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        No incidents found yet. Once incidents are ingested, their lifecycle state will
+                        be visualized here.
+                      </p>
+                    )}
+                  </CardContent>
+                </Card>
+              </section>
+
+              <div className="grid grid-cols-1 gap-6">
+                {loading ? (
+                  // Loading skeleton
+                  Array.from({ length: 3 }).map((_, index) => (
+                    <Card key={index} className="border-muted">
+                      <CardHeader className="space-y-2">
+                        <div className="h-6 w-3/4 bg-muted animate-pulse rounded"></div>
+                        <div className="h-4 w-1/2 bg-muted animate-pulse rounded"></div>
+                      </CardHeader>
+                      <CardContent className="space-y-6">
+                        <div className="space-y-2">
+                          <div className="h-4 w-full bg-muted animate-pulse rounded"></div>
+                          <div className="h-4 w-5/6 bg-muted animate-pulse rounded"></div>
+                        </div>
+                        <div className="h-10 w-32 bg-muted animate-pulse rounded"></div>
+                      </CardContent>
+                    </Card>
+                  ))
+                ) : (
+                  incidents.map((incident) => (
+                    <Card key={incident.id} className="hover:shadow-md transition-shadow duration-200 border-muted">
+                      <CardContent className="p-6">
+                        <div className="flex flex-col md:flex-row justify-between items-start gap-4">
+                          <div className="space-y-4 flex-1">
+                            <div>
+                              <div className="flex items-center gap-3 mb-2">
+                                <h2 className="text-xl font-semibold">
+                                  {incident.short_description}
+                                </h2>
+                                <Badge variant={getStateBadgeVariant(incident.state)} className={getStateBadgeClass(incident.state)}>
+                                  {incident.state || 'Unknown'}
+                                </Badge>
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-sm text-muted-foreground">
+                                <p><span className="font-medium text-foreground">Incident Number:</span> {incident.inc_number}</p>
+                                <p><span className="font-medium text-foreground">Tag ID:</span> {incident.tag_id}</p>
+                                {incident.alert_type_id && <p><span className="font-medium text-foreground">Alert Type ID:</span> {incident.alert_type_id}</p>}
+                                <p><span className="font-medium text-foreground">Created:</span> {new Date(incident.created_at).toLocaleString()}</p>
+                              </div>
+                            </div>
+
+                            <div className="space-y-2">
+                              <div className="flex justify-between text-xs text-muted-foreground">
+                                <span>Progress</span>
+                                <span>{getStateProgress(incident.state)}%</span>
+                              </div>
+                              <Progress value={getStateProgress(incident.state)} className="h-1.5" />
+                            </div>
+
+                            {actionResponses[incident.id] && (
+                              <div className="p-4 bg-muted/50 rounded-lg text-sm border border-border">
+                                <h3 className="font-medium mb-1">Action Response:</h3>
+                                <p className="text-muted-foreground">{actionResponses[incident.id]}</p>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex flex-row md:flex-col gap-2 w-full md:w-auto">
+                            <Button
+                              variant="secondary"
+                              onClick={() => router.push(`/Details/${incident.inc_number}`)}
+                              className="w-full md:w-auto"
+                            >
+                              Details
+                            </Button>
+                            <Button
+                              onClick={() => handleTakeAction(incident)}
+                              disabled={actionLoading === incident.id}
+                              className={`w-full md:w-auto ${actionLoading === incident.id ? 'opacity-70' : ''}`}
+                              variant={actionLoading === incident.id ? "ghost" : "default"}
+                            >
+                              {actionLoading === incident.id ? (
+                                <>
+                                  <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin mr-2"></div>
+                                  Taking Action...
+                                </>
+                              ) : (
+                                'Take Action'
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))
+                )}
+              </div>
             </div>
           </main>
 
-          {/* Plan Confirmation Modal */}
-          {showPlanModal && selectedIncident && (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
-              <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-2xl w-full max-h-[80vh] overflow-y-auto">
-                <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
-                  Action Plan for {selectedIncident.short_description}
-                </h2>
-                <div className="space-y-4 mb-4">
-                  <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-                    <h3 className="text-sm font-medium text-gray-900 dark:text-white mb-2">
-                      Incident Details:
-                    </h3>
-                    <p className="text-sm text-gray-700 dark:text-gray-300">
-                      <span className="font-medium">IP Address:</span>{' '}
-                      {plans[selectedIncident.id]?.ipAddress}
-                    </p>
-                    <p className="text-sm text-gray-700 dark:text-gray-300">
-                      <span className="font-medium">Tag ID:</span> {selectedIncident.tag_id}
-                    </p>
-                    <p className="text-sm text-gray-700 dark:text-gray-300">
-                      <span className="font-medium">OS:</span> {plans[selectedIncident.id]?.os}
-                    </p>
+          {/* Create Incident Modal */}
+          <Dialog open={showCreateModal} onOpenChange={setShowCreateModal}>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>Create New Incident</DialogTitle>
+                <DialogDescription>Manually create a new incident in the system.</DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4 py-4">
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <label htmlFor="desc" className="text-right text-sm font-medium">Description</label>
+                  <input
+                    id="desc"
+                    className="col-span-3 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    value={newIncidentData.short_description}
+                    onChange={(e) => setNewIncidentData({ ...newIncidentData, short_description: e.target.value })}
+                  />
+                </div>
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <label htmlFor="tag" className="text-right text-sm font-medium">Tag ID</label>
+                  <input
+                    id="tag"
+                    className="col-span-3 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    value={newIncidentData.tag_id}
+                    onChange={(e) => setNewIncidentData({ ...newIncidentData, tag_id: e.target.value })}
+                  />
+                </div>
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <label htmlFor="alertType" className="text-right text-sm font-medium">Alert Type</label>
+                  <select
+                    id="alertType"
+                    className="col-span-3 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    value={newIncidentData.alert_type_id}
+                    onChange={(e) => setNewIncidentData({ ...newIncidentData, alert_type_id: e.target.value })}
+                  >
+                    <option value="">Select Alert Type</option>
+                    {alertTypes.map(type => (
+                      <option key={type.id} value={type.id}>{type.name} ({type.priority})</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setShowCreateModal(false)}>Cancel</Button>
+                <Button onClick={handleCreateIncident} disabled={createLoading}>
+                  {createLoading ? "Creating..." : "Create Incident"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={showPlanModal} onOpenChange={handleCloseModal}>
+            <DialogContent className="sm:max-w-2xl">
+              <DialogHeader>
+                <DialogTitle>Action Plan for {selectedIncident?.short_description}</DialogTitle>
+                <DialogDescription>
+                  Review the proposed action plan before execution.
+                </DialogDescription>
+              </DialogHeader>
+
+              {selectedIncident && (
+                <div className="space-y-4 py-4">
+                  <div className="bg-muted/50 rounded-lg p-4 space-y-2 text-sm">
+                    <h3 className="font-medium">Incident Details</h3>
+                    <div className="grid grid-cols-2 gap-2 text-muted-foreground">
+                      <p><span className="font-medium text-foreground">IP Address:</span> {plans[selectedIncident.id]?.ipAddress}</p>
+                      <p><span className="font-medium text-foreground">OS:</span> {plans[selectedIncident.id]?.os}</p>
+                      <p><span className="font-medium text-foreground">Tag ID:</span> {selectedIncident.tag_id}</p>
+                    </div>
                   </div>
-                  <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-                    <h3 className="text-sm font-medium text-gray-900 dark:text-white mb-2">
-                      Action Plan:
-                    </h3>
-                    <pre className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
+
+                  <div className="bg-muted/50 rounded-lg p-4 space-y-2">
+                    <h3 className="font-medium text-sm">Action Plan</h3>
+                    <pre className="text-xs md:text-sm bg-background p-2 rounded border overflow-x-auto whitespace-pre-wrap">
                       {typeof plans[selectedIncident.id]?.plan === 'object'
                         ? JSON.stringify(plans[selectedIncident.id]?.plan, null, 2)
                         : plans[selectedIncident.id]?.plan}
                     </pre>
                   </div>
                 </div>
-                <div className="flex justify-end space-x-4">
-                  <button
-                    onClick={() => {
-                      setShowPlanModal(false);
-                      setSelectedIncident(null);
-                      setExecuteLoading(false);
-                    }}
-                    className="px-4 py-2 bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-900 dark:text-white rounded-lg transition-colors duration-200"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={executePlan}
-                    disabled={executeLoading}
-                    className={`px-4 py-2 rounded-lg transition-colors duration-200 ${
-                      executeLoading
-                        ? 'bg-gray-300 dark:bg-gray-600 cursor-not-allowed'
-                        : 'bg-green-600 hover:bg-green-700 text-white'
-                    }`}
-                  >
-                    {executeLoading ? (
-                      <div className="flex items-center">
-                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                        Executing...
-                      </div>
-                    ) : (
-                      'Execute Plan'
-                    )}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+              )}
+
+              <DialogFooter>
+                <Button variant="outline" onClick={() => handleCloseModal(false)}>Cancel</Button>
+                <Button onClick={executePlan} disabled={executeLoading}>
+                  {executeLoading ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                      Executing...
+                    </>
+                  ) : 'Execute Plan'}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
       </SignedIn>
     </ClerkProvider>

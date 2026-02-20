@@ -1,959 +1,839 @@
 'use client';
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import axios from "axios";
 import { useAuth } from '@clerk/nextjs';
 import { Toaster, toast } from 'react-hot-toast';
 import { ClerkProvider, SignedIn, UserButton } from '@clerk/nextjs';
-import Link from 'next/link';
-import { MdDashboard, MdSecurity } from 'react-icons/md';
-import { BsChatFill } from 'react-icons/bs';
-import { FaDatabase, FaBookOpen } from 'react-icons/fa';
-import { FaSearch } from 'react-icons/fa';
+import { Bot, User, Loader2, Send, Zap, FileText, Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft, ChevronRight, ChevronDown, Wrench, Database, AlertCircle, X } from 'lucide-react';
+import { Sidebar, MobileSidebar } from "@/components/sidebar";
+import { ModeToggle } from "@/components/mode-toggle";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 
 export default function Chat() {
   const [message, setMessage] = useState("");
   const [chatHistory, setChatHistory] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [currentSessionId, setCurrentSessionId] = useState(null);
   const [plan, setPlan] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadingStage, setLoadingStage] = useState("thinking");
   const [isWebSearch, setIsWebSearch] = useState(false);
   const [runAsync, setRunAsync] = useState(false);
-  const [activeTab, setActiveTab] = useState("chat");
+  const [showPlanDialog, setShowPlanDialog] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [streamedResponse, setStreamedResponse] = useState("");
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [sessionToDelete, setSessionToDelete] = useState(null);
+  const [currentToolCalls, setCurrentToolCalls] = useState([]);
+  
+  // Memory store for conversation context
+  const [conversationContext, setConversationContext] = useState({
+    lastToolOutputs: {},  // Store tool outputs by tool name
+    lastQueryResults: {}, // Store query results for re-formatting
+    lastDataType: null,   // Type of data returned (cmdb, incidents, etc.)
+    lastRawData: null,   // Raw data that can be reformatted
+  });
+
   const { getToken } = useAuth();
   const [token, setToken] = useState(null);
+  const bottomRef = useRef(null);
+  const abortControllerRef = useRef(null);
 
   const getClerkToken = async () => {
-    const t = await getToken({ template: "auth_token" }); // Fetch token using a custom template
-    setToken(t); // Store the token in state
+    try {
+      const t = await getToken({ template: "auth_token" });
+      setToken(t);
+    } catch (err) {
+      console.error("Failed to get auth token", err);
+    }
   };
 
-  // Fetch Clerk token
   useEffect(() => {
-    if (!token) {
-      getClerkToken().catch((err) => {
-        console.error("Failed to get auth token", err);
-      });
-    }
+    if (!token) getClerkToken();
   }, [token]);
- 
-  // Load chat history from localStorage on first mount so it persists between page navigations
+
+  // Fetch Sessions on Load
   useEffect(() => {
-    try {
-      const stored = typeof window !== "undefined" ? localStorage.getItem("chatHistory") : null;
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setChatHistory(parsed);
-        }
-      }
-    } catch (err) {
-      console.error("Failed to load chat history from localStorage", err);
-    }
-  }, []);
- 
-  // Load server-side chat history when token is available
-  useEffect(() => {
-    const fetchHistory = async () => {
+    const fetchSessions = async () => {
       if (!token) return;
       try {
-        const res = await axios.get("http://localhost:8000/chat/history?limit=50&offset=0", {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
+        const res = await axios.get("http://localhost:8000/chat/sessions", {
+          headers: { Authorization: `Bearer ${token}` }
         });
- 
-        const rows = res.data?.response?.data || [];
-        // Supabase returns newest first; reverse for chronological display
-        const normalized = rows
-          .slice()
-          .reverse()
-          .map((row) => ({
-            id: row.id,
-            chat: row.message_content,
-            response: row.response_text,
-            createdAt: row.created_at,
-            isAsync: row.is_async,
-            status: row.is_async ? "completed" : "completed",
-            jobId: row.job_id || null,
-          }));
- 
-        setChatHistory((prev) => (prev.length > 0 ? prev : normalized));
+        const fetchedSessions = res.data?.response || [];
+        setSessions(fetchedSessions);
+
+        // Load most recent session if available and none selected
+        if (fetchedSessions.length > 0 && !currentSessionId) {
+          setCurrentSessionId(fetchedSessions[0].id);
+        }
       } catch (error) {
-        console.error("Failed to load chat history:", error);
+        console.error("Failed to fetch sessions:", error);
       }
     };
- 
-    fetchHistory();
+    fetchSessions();
   }, [token]);
- 
-  // Save chat history to localStorage whenever it changes (optional client-side cache)
+
+  // Fetch History when Session Changes
   useEffect(() => {
+    const fetchHistory = async () => {
+      if (!token || !currentSessionId) {
+        if (!currentSessionId) setChatHistory([]);
+        return;
+      }
+
+      try {
+        const res = await axios.get(`http://localhost:8000/chat/history/${currentSessionId}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+
+        const rows = res.data?.response?.data || [];
+        const normalized = rows.map((row) => ({
+          id: row.id,
+          chat: row.message_content,
+          response: row.response_text,
+          createdAt: row.created_at,
+          isAsync: row.is_async,
+          status: row.is_async ? "completed" : "completed",
+          jobId: row.job_id || null,
+          toolCalls: row.raw_result?.tool_calls || [],
+        }));
+
+        setChatHistory(normalized);
+      } catch (error) {
+        console.error("Failed to load chat history:", error);
+        toast.error("Failed to load chat history");
+      }
+    };
+
+    fetchHistory();
+  }, [currentSessionId, token]);
+
+  // Scroll to bottom
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatHistory, loading, streamedResponse]);
+
+  const createNewSession = async () => {
+    setCurrentSessionId(null);
+    setChatHistory([]);
+    setStreamedResponse("");
+    if (!token) return;
     try {
-      localStorage.setItem("chatHistory", JSON.stringify(chatHistory));
-    } catch {
-      // ignore storage errors
+      const res = await axios.post("http://localhost:8000/chat/sessions",
+        { title: "New Chat" },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const newSession = res.data.response;
+      setSessions([newSession, ...sessions]);
+      setCurrentSessionId(newSession.id);
+    } catch (e) {
+      toast.error("Failed to create new chat");
     }
-  }, [chatHistory]);
+  };
+
+  const confirmDeleteSession = (session) => {
+    setSessionToDelete(session);
+    setShowDeleteDialog(true);
+  };
+
+  const deleteSession = async () => {
+    if (!sessionToDelete || !token) return;
+    try {
+      await axios.delete(`http://localhost:8000/chat/sessions/${sessionToDelete.id}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setSessions(sessions.filter(s => s.id !== sessionToDelete.id));
+      if (currentSessionId === sessionToDelete.id) {
+        setCurrentSessionId(sessions.length > 1 ? sessions.find(s => s.id !== sessionToDelete.id)?.id : null);
+        setChatHistory([]);
+      }
+      toast.success("Chat deleted");
+    } catch (e) {
+      toast.error("Failed to delete chat");
+    } finally {
+      setShowDeleteDialog(false);
+      setSessionToDelete(null);
+    }
+  };
 
   const handleSend = async () => {
     if (!message.trim()) return;
 
-    // Store user message in chatHistory immediately
+    // Cancel any existing streaming request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    // Create session if not exists
+    let activeSessionId = currentSessionId;
+    if (!activeSessionId) {
+      try {
+        const res = await axios.post("http://localhost:8000/chat/sessions",
+          { title: message.substring(0, 30) || "New Chat" },
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const newSession = res.data.response;
+        setSessions([newSession, ...sessions]);
+        setCurrentSessionId(newSession.id);
+        activeSessionId = newSession.id;
+      } catch (e) {
+        toast.error("Failed to create new chat session");
+        return;
+      }
+    }
+
+    const userMessage = message;
+    const tempId = Date.now().toString();
+
     setChatHistory((prev) => [
       ...prev,
       {
-        id: undefined,
-        chat: message,
-        response: null, // Will be updated when we get the AI response
+        id: tempId,
+        chat: userMessage,
+        response: null,
         isAsync: !isWebSearch && runAsync,
-        status: !isWebSearch && runAsync ? "planning" : null,
+        status: !isWebSearch && runAsync ? "planning" : "thinking",
         jobId: null,
+        toolCalls: [],
       },
     ]);
 
     setLoading(true);
     setLoadingStage("thinking");
+    setStreamedResponse("");
+    setCurrentToolCalls([]);
+
+    // Check if user is asking for re-formatting of previous data
+    const isReformatRequest = /table|format|list|show.*(again|as)/i.test(userMessage);
+    const shouldIncludeContext = isReformatRequest && conversationContext.lastRawData;
 
     try {
       if (isWebSearch) {
-        // Call web search API
         const res = await axios.post(
-          `http://localhost:8000/websearch?message=${encodeURIComponent(message)}`,
+          `http://localhost:8000/websearch?message=${encodeURIComponent(userMessage)}`,
           {},
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-              Accept: "application/json",
-            },
-          }
+          { headers: { Authorization: `Bearer ${token}` } }
         );
-
-        // Update chat history with web search response
         setChatHistory((prev) => {
           const newHistory = [...prev];
           const lastIndex = newHistory.length - 1;
-          const lastItem = newHistory[lastIndex];
-          if (lastItem && lastItem.response === null) {
-            newHistory[lastIndex] = {
-              ...lastItem,
-              response: res.data.response,
-              isAsync: false,
-              status: "completed",
-            };
-          }
+          newHistory[lastIndex] = { ...newHistory[lastIndex], response: res.data.response, status: "completed" };
           return newHistory;
         });
-
-        toast.success("Web search completed!", {
-          duration: 2000,
-          position: "top-center",
-          icon: "🔍",
-        });
       } else {
-        // Plan creation logic
-        const res = await axios.post(
-          "http://localhost:8000/plan",
-          { content: message },
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-              Accept: "application/json",
-            },
-          }
-        );
-        const responsePlan = res.data?.response?.plan || [];
-        setPlan(responsePlan);
-
-        // Show the modal immediately after getting the plan
-        const modal = document.getElementById("my_modal_1");
-        if (modal) modal.showModal();
-
-        toast.success("Plan created successfully! Please review and accept.", {
-          duration: 3000,
-          position: "top-center",
-          icon: "📋",
+        // Use streaming endpoint
+        abortControllerRef.current = new AbortController();
+        
+        // Build context payload for re-formatting requests
+        const contextPayload = shouldIncludeContext ? {
+          previous_data: conversationContext.lastRawData,
+          previous_data_type: conversationContext.lastDataType,
+          format_request: userMessage,
+        } : {};
+        
+        const response = await fetch("http://localhost:8000/chat/stream", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            content: userMessage,
+            session_id: activeSessionId,
+            ...contextPayload,
+          }),
+          signal: abortControllerRef.current.signal
         });
+
+        if (!response.ok) {
+          throw new Error("Stream request failed");
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let accumulatedResponse = "";
+        let toolCalls = [];
+        let currentMessageId = tempId;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6);
+              if (data === '[DONE]') continue;
+              
+              try {
+                const parsed = JSON.parse(data);
+                
+                if (parsed.type === 'tool_call') {
+                  toolCalls.push(parsed.tool);
+                  setLoadingStage("using_tools");
+                  setCurrentToolCalls(parsed.tool);
+                  
+                  // Update the last message with tool call - don't reset entire history
+                  setChatHistory((prev) => {
+                    const newHistory = [...prev];
+                    const lastIndex = newHistory.length - 1;
+                    if (lastIndex >= 0) {
+                      newHistory[lastIndex] = { 
+                        ...newHistory[lastIndex], 
+                        toolCalls: [...(newHistory[lastIndex].toolCalls || []), parsed.tool],
+                        status: "using_tools"
+                      };
+                    }
+                    return newHistory;
+                  });
+                } else if (parsed.type === 'chunk') {
+                  accumulatedResponse += parsed.content || "";
+                  setStreamedResponse(accumulatedResponse);
+                  
+                  // Update chat history with streaming response
+                  setChatHistory((prev) => {
+                    const newHistory = [...prev];
+                    const lastIndex = newHistory.length - 1;
+                    if (lastIndex >= 0) {
+                      newHistory[lastIndex] = { 
+                        ...newHistory[lastIndex], 
+                        response: accumulatedResponse,
+                        status: "completed"
+                      };
+                    }
+                    return newHistory;
+                  });
+                } else if (parsed.type === 'done') {
+                  setLoading(false);
+                  setCurrentToolCalls([]);
+                  
+                  // Update conversation context with tool outputs for future re-formatting requests
+                  const lastHistoryIndex = chatHistory.length - 1;
+                  const lastItem = chatHistory[lastHistoryIndex];
+                  if (lastItem && lastItem.toolCalls) {
+                    // Extract raw data from tool outputs for re-formatting
+                    let rawData = null;
+                    let dataType = null;
+                    
+                    for (const tool of lastItem.toolCalls) {
+                      const toolName = tool.name || '';
+                      const toolOutput = tool.output;
+                      
+                      // Detect data type and extract raw data
+                      if (toolName.includes('cmdb') || toolName.includes('get_local_cmdb')) {
+                        dataType = 'cmdb';
+                        if (toolOutput && toolOutput.items) {
+                          rawData = toolOutput.items;
+                        } else if (toolOutput && toolOutput.status === 'ok') {
+                          rawData = toolOutput;
+                        }
+                      } else if (toolName.includes('incident')) {
+                        dataType = 'incidents';
+                        if (toolOutput && toolOutput.incidents) {
+                          rawData = toolOutput.incidents;
+                        } else if (toolOutput && toolOutput.status === 'ok') {
+                          rawData = toolOutput;
+                        }
+                      } else if (toolName.includes('knowledge')) {
+                        dataType = 'knowledge';
+                        if (toolOutput && toolOutput.matches) {
+                          rawData = toolOutput.matches;
+                        }
+                      }
+                      
+                      // Update context if we found data
+                      if (rawData) {
+                        setConversationContext(prev => ({
+                          ...prev,
+                          lastToolOutputs: {
+                            ...prev.lastToolOutputs,
+                            [toolName]: toolOutput
+                          },
+                          lastDataType: dataType,
+                          lastRawData: rawData,
+                        }));
+                      }
+                    }
+                  }
+                }
+              } catch (e) {
+                // Skip malformed JSON
+              }
+            }
+          }
+        }
+
+        setLoading(false);
+
+        // Update session title if it's the first message
+        if (chatHistory.length === 0) {
+          axios.put(`http://localhost:8000/chat/sessions/${activeSessionId}`,
+            { title: userMessage.substring(0, 40) },
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          setSessions(prev => prev.map(s => s.id === activeSessionId ? { ...s, title: userMessage.substring(0, 40) } : s));
+        }
       }
     } catch (error) {
-      console.error("Failed to process request:", error);
-      toast.error("Failed to process your request. Please try again.", {
-        duration: 4000,
-        position: "top-center",
-        icon: "❌",
-      });
+      if (error.name === 'AbortError') {
+        console.log("Request cancelled");
+      } else {
+        console.error("Failed:", error);
+        toast.error("Failed to send message");
+      }
     } finally {
       setLoading(false);
       setMessage("");
-      setIsWebSearch(false);
+      setCurrentToolCalls([]);
+      abortControllerRef.current = null;
     }
   };
 
-  const pollAsyncJob = (jobId) => {
-    let attempts = 0;
-    const maxAttempts = 60; // ~5 minutes at 5s interval
-
-    const checkStatus = async () => {
-      try {
-        if (!token) return;
-        const res = await axios.get(`http://localhost:8000/chat/async/${jobId}`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-        });
-
-        const data = res.data;
-        const status = data.status || "unknown";
-        let responseText = null;
-
-        if (status === "completed") {
-          responseText = data.result?.successorfail || JSON.stringify(data.result);
-        }
-
-        setChatHistory((prev) =>
-          prev.map((item) =>
-            item.jobId === jobId || item.id === jobId
-              ? {
-                  ...item,
-                  status,
-                  response: responseText !== null ? responseText : item.response,
-                }
-              : item
-          )
-        );
-
-        if (status === "completed") {
-          toast.success("Async chat completed", {
-            duration: 3000,
-            position: "top-center",
-          });
-          return;
-        }
-
-        if (status === "error") {
-          toast.error("Async chat failed", {
-            duration: 4000,
-            position: "top-center",
-          });
-          return;
-        }
-
-        if (status === "queued" || status === "processing") {
-          attempts += 1;
-          if (attempts < maxAttempts) {
-            setTimeout(checkStatus, 5000);
-          }
-        }
-      } catch (error) {
-        console.error(`Failed to fetch async chat job ${jobId}:`, error);
-        setChatHistory((prev) =>
-          prev.map((item) =>
-            item.jobId === jobId || item.id === jobId
-              ? { ...item, status: "error" }
-              : item
-          )
-        );
-        toast.error("Error while polling async chat job", {
-          duration: 4000,
-          position: "top-center",
-        });
-      }
-    };
-
-    checkStatus();
-  };
-
-  const handlePlanSubmit = async () => {
-    const lastUserMessage =
-      chatHistory.length > 0
-        ? chatHistory[chatHistory.length - 1].chat
-        : message;
-
-    try {
-      setLoading(true);
-      setLoadingStage("processing");
-
-      toast.success(
-        runAsync
-          ? "Plan accepted! Queuing async automation..."
-          : "Plan accepted! Processing your request...",
-        {
-          duration: 3000,
-          position: "top-center",
-          icon: runAsync ? "📨" : "🚀",
-        }
-      );
-
-      const enhancedMessage =
-        "user message: " + lastUserMessage + " plan: " + plan;
-
-      if (runAsync) {
-        const res = await axios.post(
-          "http://localhost:8000/chat/async",
-          {
-            content: enhancedMessage,
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-              Accept: "application/json",
-            },
-          }
-        );
-
-        const jobId = res.data?.job_id;
-        const initialStatus = res.data?.status || "queued";
-
-        if (!jobId) {
-          throw new Error("Backend did not return a job_id for async chat");
-        }
-
-        setChatHistory((prev) => {
-          if (prev.length === 0) {
-            return [
-              {
-                id: jobId,
-                chat: lastUserMessage,
-                response: null,
-                isAsync: true,
-                status: initialStatus,
-                jobId: jobId,
-              },
-            ];
-          }
-          const updated = [...prev];
-          const lastIndex = updated.length - 1;
-          updated[lastIndex] = {
-            ...updated[lastIndex],
-            id: jobId,
-            isAsync: true,
-            status: initialStatus,
-            jobId: jobId,
-          };
-          return updated;
-        });
-
-        pollAsyncJob(jobId);
-      } else {
-        const res = await axios.post(
-          "http://localhost:8000/chat",
-          {
-            content: enhancedMessage,
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-              Accept: "application/json",
-            },
-          }
-        );
-
-        const responseMessage = res.data?.successorfail || "No response";
-        console.log("Response from agent:", res);
-
-        // Update the last chat history item with the response
-        setChatHistory((prev) => {
-          const newHistory = [...prev];
-          const lastIndex = newHistory.length - 1;
-          const lastItem = newHistory[lastIndex];
-          if (lastItem) {
-            newHistory[lastIndex] = {
-              ...lastItem,
-              response: responseMessage,
-              status: "completed",
-              isAsync: lastItem.isAsync ?? false,
-            };
-          } else {
-            newHistory.push({
-              id: undefined,
-              chat: lastUserMessage,
-              response: responseMessage,
-              isAsync: false,
-              status: "completed",
-              jobId: null,
-            });
-          }
-          return newHistory;
-        });
-
-        toast.success("Response received successfully!", {
-          duration: 2000,
-          position: "top-center",
-          icon: "✅",
-        });
-      }
-
-      // Close the modal
-      const modal = document.getElementById("my_modal_1");
-      if (modal) modal.close();
-
-      // Clear the plan
-      setPlan([]);
-    } catch (error) {
-      console.error("Failed to send chat message:", error);
-      toast.error("Failed to process your request. Please try again.", {
-        duration: 4000,
-        position: "top-center",
-        icon: "❌",
-      });
-    } finally {
+  const cancelStream = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
       setLoading(false);
       setLoadingStage("thinking");
+      setCurrentToolCalls([]);
     }
   };
 
-  // Loading states component
-  const LoadingIndicator = () => {
-    const [dots, setDots] = useState("");
-
-    // Animation for the dots
-    useEffect(() => {
-      const interval = setInterval(() => {
-        setDots((prev) => {
-          if (prev.length >= 3) return "";
-          return prev + ".";
-        });
-      }, 500);
-
-      return () => clearInterval(interval);
-    }, []);
-
-    const thinkingMessages = [
-      "Analyzing your request",
-      "Considering options",
-      "Formulating a plan",
-      "Thinking",
-    ];
-
-    const processingMessages = [
-      "Processing your request",
-      "Working on it",
-      "Executing plan",
-      "Generating response",
-    ];
-
-    const messages = loadingStage === "thinking" ? thinkingMessages : processingMessages;
-    const [currentMessage, setCurrentMessage] = useState(messages[0]);
-
-    // Cycle through messages
-    useEffect(() => {
-      const interval = setInterval(() => {
-        setCurrentMessage((prev) => {
-          const currentIndex = messages.indexOf(prev);
-          const nextIndex = (currentIndex + 1) % messages.length;
-          return messages[nextIndex];
-        });
-      }, 2000);
-
-      return () => clearInterval(interval);
-    }, [messages]);
+  const ToolCallBadge = ({ tool }) => {
+    const [isOpen, setIsOpen] = useState(false);
+    
+    const getIcon = (toolName) => {
+      const name = toolName.toLowerCase();
+      if (name.includes('cmdb') || name.includes('getfromcmdb')) return <Database className="h-3 w-3" />;
+      if (name.includes('incident') || name.includes('create_incident') || name.includes('update_incident')) return <AlertCircle className="h-3 w-3" />;
+      if (name.includes('infra') || name.includes('automation')) return <Wrench className="h-3 w-3" />;
+      return <Bot className="h-3 w-3" />;
+    };
 
     return (
-      <div className="flex flex-col space-y-1">
-        <div className="flex items-center space-x-2 justify-end">
-          <span className="text-sm text-gray-500 dark:text-gray-400">AI Assistant</span>
-          <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center">
-            <span className="text-sm font-medium text-white">AI</span>
-          </div>
-        </div>
-        <div className="mr-10 flex justify-end">
-          <div className="flex items-center space-x-2 bg-blue-100 dark:bg-blue-900 rounded-xl p-3 animate-pulse">
-            <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center">
-              <div className="loading loading-spinner loading-sm text-white"></div>
+      <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+        <CollapsibleTrigger asChild>
+          <Badge variant="outline" className="cursor-pointer bg-purple-50 dark:bg-purple-950/30 hover:bg-purple-100 dark:hover:bg-purple-950/50 border-purple-200 dark:border-purple-800">
+            {getIcon(tool.name)}
+            <span className="ml-1 text-xs">{tool.name}</span>
+            {isOpen ? <ChevronDown className="h-3 w-3 ml-1" /> : <ChevronRight className="h-3 w-3 ml-1" />}
+          </Badge>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="mt-2 p-3 bg-muted/50 rounded-lg">
+          <pre className="text-xs overflow-x-auto whitespace-pre-wrap">
+            {JSON.stringify(tool.args, null, 2)}
+          </pre>
+          {tool.output && (
+            <div className="mt-2 pt-2 border-t">
+              <p className="text-xs font-medium text-muted-foreground">Result:</p>
+              <pre className="text-xs overflow-x-auto whitespace-pre-wrap mt-1 text-green-600 dark:text-green-400">
+                {typeof tool.output === 'string' ? tool.output : JSON.stringify(tool.output, null, 2)}
+              </pre>
             </div>
-            <div>
-              <p className="text-sm font-medium text-blue-700 dark:text-blue-300">
-                {currentMessage}
-                <span className="inline-block w-8">{dots}</span>
-              </p>
-              <p className="text-xs text-blue-500 dark:text-blue-400">
-                {loadingStage === "thinking" ? "Creating plan" : "Executing plan"}
-              </p>
+          )}
+        </CollapsibleContent>
+      </Collapsible>
+    );
+  };
+
+  const MarkdownRenderer = ({ content }) => {
+    if (!content) return null;
+    
+    // Helper function to parse and render markdown tables
+    const renderTable = (lines, startIndex) => {
+      // Find the table header and separator
+      const tableLines = [];
+      let i = startIndex;
+      
+      // Collect all table lines until we hit a non-table line
+      while (i < lines.length) {
+        const line = lines[i];
+        // Table lines start with | or are part of table formatting
+        if (line.trim().startsWith('|') || line.includes('|')) {
+          tableLines.push(line);
+          i++;
+        } else if (line.trim() === '') {
+          i++;
+          continue;
+        } else {
+          break;
+        }
+      }
+      
+      if (tableLines.length < 2) return null;
+      
+      // Parse header
+      const headers = tableLines[0].split('|').map(h => h.trim()).filter(h => h);
+      
+      // Skip separator line (index 1)
+      // Parse data rows
+      const rows = [];
+      for (let j = 2; j < tableLines.length; j++) {
+        const cells = tableLines[j].split('|').map(c => c.trim()).filter(c => c);
+        if (cells.length > 0) {
+          rows.push(cells);
+        }
+      }
+      
+      return { headers, rows, consumed: i - startIndex };
+    };
+    
+    // Process content and extract tables
+    const elements = [];
+    const lines = content.split('\n');
+    let i = 0;
+    
+    while (i < lines.length) {
+      const line = lines[i];
+      
+      if (line.startsWith("# ")) {
+        elements.push(<h1 key={i} className="text-xl font-bold mt-4 mb-2">{line.substring(2)}</h1>);
+      } else if (line.startsWith("## ")) {
+        elements.push(<h2 key={i} className="text-lg font-semibold mt-3 mb-1">{line.substring(3)}</h2>);
+      } else if (line.startsWith("### ")) {
+        elements.push(<h3 key={i} className="text-base font-semibold mt-2 mb-1">{line.substring(4)}</h3>);
+      } else if (line.startsWith("- ")) {
+        elements.push(<li key={i} className="ml-4 list-disc">{line.substring(2)}</li>);
+      } else if (line.startsWith("```")) {
+        const code = line.substring(3);
+        if (!code) {
+          elements.push(null);
+        } else {
+          elements.push(<div key={i} className="bg-slate-950 p-3 rounded-md my-2 overflow-x-auto border border-slate-800"><code className="text-xs font-mono text-slate-50">{code}</code></div>);
+        }
+      } else if (line.match(/^\d+\.\s/)) {
+        elements.push(<li key={i} className="ml-4 list-decimal">{line.replace(/^\d+\.\s/, '')}</li>);
+      } else if (line.includes('|') && line.trim().startsWith('|')) {
+        // This is a table - parse it
+        const tableResult = renderTable(lines, i);
+        if (tableResult) {
+          elements.push(
+            <div key={i} className="overflow-x-auto my-4">
+              <table className="min-w-full divide-y divide-border border border-border rounded-lg overflow-hidden">
+                <thead className="bg-muted">
+                  <tr>
+                    {tableResult.headers.map((header, hi) => (
+                      <th key={hi} className="px-4 py-2 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                        {header}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="bg-card divide-y divide-border">
+                  {tableResult.rows.map((row, ri) => (
+                    <tr key={ri} className={ri % 2 === 0 ? 'bg-card' : 'bg-muted/30'}>
+                      {row.map((cell, ci) => (
+                        <td key={ci} className="px-4 py-2 text-sm text-foreground">
+                          {cell}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          </div>
-        </div>
+          );
+          i += tableResult.consumed;
+        } else {
+          elements.push(<p key={i} className="leading-relaxed">{line || <br />}</p>);
+        }
+      } else {
+        elements.push(<p key={i} className="leading-relaxed">{line || <br />}</p>);
+      }
+      i++;
+    }
+    
+    return (
+      <div className="prose prose-sm dark:prose-invert max-w-none space-y-2 text-foreground">
+        {elements}
       </div>
     );
   };
 
+  const LoadingIndicator = () => (
+    <div className="flex justify-start w-full my-4">
+      <div className="bg-muted/50 p-4 rounded-2xl rounded-tl-none space-y-2 animate-in fade-in slide-in-from-left-2">
+        <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          {loadingStage === "thinking" ? "Thinking..." : "Using tools..."}
+        </div>
+        {loadingStage === "using_tools" && (
+          <div className="flex items-center gap-2">
+            <div className="h-2 w-2 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+            <div className="h-2 w-2 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+            <div className="h-2 w-2 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+          </div>
+        )}
+        {currentToolCalls && currentToolCalls.name && (
+          <div className="flex items-center gap-2 text-xs text-purple-600 dark:text-purple-400">
+            <Database className="h-3 w-3" />
+            <span>Running: {currentToolCalls.name}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <ClerkProvider>
       <SignedIn>
-        <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-          <Toaster />
-          {/* Navigation Bar */}
-          <nav className="bg-white dark:bg-gray-800 shadow-sm">
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-              <div className="flex items-center justify-between h-16">
-                <div className="flex items-center space-x-8">
-                  <h1 className="text-xl font-bold text-gray-900 dark:text-white">Infra.ai Dashboard</h1>
-                  <div className="hidden md:flex space-x-4">
-                    <Link
-                      href="/dashboard"
-                      className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400"
+        <div className="h-screen w-full flex bg-background overflow-hidden relative">
+          <Toaster position="top-center" />
+
+          {/* Main Sidebar (Navigation) */}
+          <div className="hidden md:flex md:w-64 md:flex-col md:fixed md:inset-y-0 z-50">
+            <Sidebar />
+          </div>
+
+          {/* Chat Interface Container */}
+          <main className="flex-1 flex md:pl-64 h-full">
+
+            {/* Chat History Sidebar */}
+            <div className={`${isSidebarOpen ? 'w-72' : 'w-0'} bg-gradient-to-b from-card to-muted/20 border-r transition-all duration-300 flex flex-col relative overflow-hidden`}>
+              <div className="p-4 border-b flex items-center justify-between bg-card/50 backdrop-blur shrink-0">
+                <h2 className="font-semibold text-sm flex items-center gap-2">
+                  <MessageSquare className="h-4 w-4" />
+                  Chats
+                </h2>
+                <Button variant="ghost" size="icon" onClick={() => setIsSidebarOpen(false)} className="md:hidden">
+                  <PanelLeftClose className="h-4 w-4" />
+                </Button>
+              </div>
+
+              <div className="p-3">
+                <Button onClick={createNewSession} className="w-full justify-start gap-2 bg-gradient-to-r from-primary to-purple-600 hover:from-primary/90 hover:to-purple-600/90" variant="default">
+                  <Plus className="h-4 w-4" /> New Chat
+                </Button>
+              </div>
+
+              <ScrollArea className="flex-1 px-3 pb-3">
+                <div className="space-y-1">
+                  {sessions.map((session) => (
+                    <div
+                      key={session.id}
+                      className={`group flex items-center gap-2 p-3 rounded-lg cursor-pointer transition-all ${
+                        currentSessionId === session.id 
+                          ? "bg-primary/10 border border-primary/20" 
+                          : "hover:bg-muted/50 border border-transparent"
+                      }`}
+                      onClick={() => setCurrentSessionId(session.id)}
                     >
-                      <MdDashboard className="w-5 h-5 mr-2" />
-                      Dashboard
-                    </Link>
-                    <Link
-                      href="/creds"
-                      className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400"
-                    >
-                      <MdSecurity className="w-5 h-5 mr-2" />
-                      Credentials
-                    </Link>
-                    <Link
-                      href="/chat"
-                      className="flex items-center px-3 py-2 text-sm font-medium text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400"
-                    >
-                      <BsChatFill className="w-5 h-5 mr-2" />
-                      Chat
-                    </Link>
-                    <Link
-                      href="/cmdb"
-                      className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400"
-                    >
-                      <FaDatabase className="w-5 h-5 mr-2" />
-                      CMDB
-                    </Link>
-                    <Link
-                      href="/knowledge"
-                      className="flex items-center px-3 py-2 text-sm font-medium text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400"
-                    >
-                      <FaBookOpen className="w-5 h-5 mr-2" />
-                      Knowledge Base
-                    </Link>
+                      <div className="flex-1 min-w-0 pr-2">
+                        <p className="text-sm font-medium truncate max-w-[180px]" title={session.title || "New Chat"}>{session.title || "New Chat"}</p>
+                        <p className="text-xs text-muted-foreground truncate">
+                          {session.updated_at ? new Date(session.updated_at).toLocaleDateString() : 'Just now'}
+                        </p>
+                      </div>
+                      <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-destructive/10 shrink-0"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          confirmDeleteSession(session);
+                        }}
+                      >
+                        <Trash2 className="h-3 w-3 text-destructive" />
+                      </Button>
+                    </div>
+                  ))}
+                  {sessions.length === 0 && (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <MessageSquare className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No chats yet</p>
+                      <p className="text-xs">Start a new conversation</p>
+                    </div>
+                  )}
+                </div>
+              </ScrollArea>
+            </div>
+
+            {/* Main Chat Area */}
+            <div className="flex-1 flex flex-col h-full relative min-w-0">
+
+              {/* Header */}
+              <div className="h-14 border-b flex items-center px-4 justify-between bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 z-10">
+                <div className="flex items-center gap-2">
+                  {!isSidebarOpen && (
+                    <Button variant="ghost" size="icon" onClick={() => setIsSidebarOpen(true)} className="mr-2">
+                      <PanelLeft className="h-4 w-4" />
+                    </Button>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <Bot className="h-5 w-5 text-primary" />
+                    <span className="font-semibold text-sm">
+                      {sessions.find(s => s.id === currentSessionId)?.title || "Assistant"}
+                    </span>
                   </div>
                 </div>
-                <div className="flex items-center">
-                  <UserButton
-                    appearance={{
-                      elements: {
-                        userButtonAvatarBox: "w-10 h-10 rounded-full",
-                      },
-                    }}
-                  />
+                <div className="flex items-center gap-2">
+                  <ModeToggle />
+                  <UserButton />
                 </div>
               </div>
-            </div>
-          </nav>
 
-          {/* Main Content */}
-          <main className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-            <div className="bg-white dark:bg-gray-800 shadow-lg rounded-lg overflow-hidden">
-              <div className="p-6">
-                <div className="flex flex-col h-[600px]">
-                  {/* Tabs: Chat vs History */}
-                  <div className="mb-4 border-b border-gray-200 dark:border-gray-700">
-                    <div className="inline-flex rounded-md shadow-sm overflow-hidden">
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab("chat")}
-                        className={`px-4 py-2 text-sm font-medium focus:outline-none ${
-                          activeTab === "chat"
-                            ? "bg-blue-600 text-white"
-                            : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-                        }`}
-                      >
-                        Chat
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab("history")}
-                        className={`px-4 py-2 text-sm font-medium focus:outline-none ${
-                          activeTab === "history"
-                            ? "bg-blue-600 text-white"
-                            : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-                        }`}
-                      >
-                        History
-                      </button>
+              {/* Messages */}
+              <div className="flex-1 overflow-y-auto p-4 md:p-6 scroll-smooth bg-gradient-to-b from-background to-muted/5">
+                <div className="max-w-3xl mx-auto space-y-6 pb-4">
+                  {chatHistory.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-[50vh] text-center space-y-4">
+                      <div className="bg-gradient-to-br from-primary/20 to-purple-500/20 p-5 rounded-full">
+                        <Bot className="h-12 w-12 text-primary" />
+                      </div>
+                      <h3 className="text-xl font-semibold bg-gradient-to-r from-primary to-purple-600 bg-clip-text text-transparent">
+                        How can I help you today?
+                      </h3>
+                      <p className="text-sm text-muted-foreground max-w-md">
+                        I can help you manage incidents, query CMDB data, run infrastructure automation, and more.
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 w-full max-w-lg">
+                        <Button variant="outline" className="justify-start h-auto py-3 hover:bg-primary/5" onClick={() => setMessage("Show open incidents")}>
+                          <FileText className="h-4 w-4 mr-2" /> Show open incidents
+                        </Button>
+                        <Button variant="outline" className="justify-start h-auto py-3 hover:bg-primary/5" onClick={() => setMessage("Check database servers in CMDB")}>
+                          <Database className="h-4 w-4 mr-2" /> Query CMDB
+                        </Button>
+                        <Button variant="outline" className="justify-start h-auto py-3 hover:bg-primary/5" onClick={() => setMessage("Show system health status")}>
+                          <Zap className="h-4 w-4 mr-2" /> System health
+                        </Button>
+                      </div>
                     </div>
-                  </div>
+                  ) : (
+                    chatHistory.map((item, index) => (
+                      <div key={item.id || index} className="space-y-4">
+                        {/* User */}
+                        <div className="flex justify-end">
+                          <div className="flex gap-3 max-w-[85%]">
+                            <div className="bg-gradient-to-r from-primary to-purple-600 text-primary-foreground px-4 py-3 rounded-2xl rounded-tr-none shadow-sm">
+                              <p className="text-sm">{item.chat}</p>
+                            </div>
+                            <div className="hidden sm:flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-full bg-muted border">
+                              <User className="h-4 w-4" />
+                            </div>
+                          </div>
+                        </div>
 
-                  <div className="flex-1 overflow-y-auto space-y-4 mb-4">
-                    {activeTab === "chat" ? (
-                      <>
-                        {chatHistory.map((item, index) => (
-                          <div key={index} className="space-y-4">
-                            {/* User Message */}
-                            <div className="flex flex-col space-y-1">
-                              <div className="flex items-center space-x-2">
-                                <div className="w-8 h-8 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center">
-                                  <span className="text-sm font-medium text-gray-600 dark:text-gray-300">You</span>
-                                </div>
-                                <span className="text-sm text-gray-500 dark:text-gray-400">User</span>
+                        {/* Tool Calls */}
+                        {item.toolCalls && item.toolCalls.length > 0 && (
+                          <div className="flex justify-start ml-11">
+                            <div className="flex flex-wrap gap-2">
+                              {item.toolCalls.map((tool, ti) => (
+                                <ToolCallBadge key={ti} tool={tool} />
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Assistant */}
+                        {(item.response || item.isAsync) && (
+                          <div className="flex justify-start">
+                            <div className="flex gap-3 max-w-[85%]">
+                              <div className="hidden sm:flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-full bg-gradient-to-br from-primary/20 to-purple-500/20 border border-primary/20">
+                                <Bot className="h-4 w-4 text-primary" />
                               </div>
-                              <div className="ml-10">
-                                <div className="bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg px-4 py-2 max-w-[80%] break-words">
-                                  {item.chat}
+                              <div className="space-y-2">
+                                <div className="bg-muted/50 px-4 py-3 rounded-2xl rounded-tl-none border shadow-sm">
+                                  {item.response ? (
+                                    <MarkdownRenderer content={item.response} />
+                                  ) : (
+                                    <div className="flex items-center gap-2 text-sm text-muted-foreground animate-pulse">
+                                      <Zap className="h-3 w-3" />
+                                      {item.status || "Processing..."}
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                             </div>
-
-                            {/* Async status badge (for jobs that are still running or queued) */}
-                            {item.isAsync && (
-                              <div className="ml-10 mt-1">
-                                <span
-                                  className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                                    item.status === "queued"
-                                      ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
-                                      : item.status === "processing" || item.status === "planning"
-                                      ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
-                                      : item.status === "completed"
-                                      ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-                                      : item.status === "error"
-                                      ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
-                                      : "bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200"
-                                  }`}
-                                >
-                                  {item.status === "queued" && "Queued (async)"}
-                                  {item.status === "planning" && "Planning (async)"}
-                                  {item.status === "processing" && "Processing (async)"}
-                                  {item.status === "completed" && "Completed (async)"}
-                                  {item.status === "error" && "Error (async)"}
-                                  {!item.status && "Async"}
-                                </span>
-                              </div>
-                            )}
-
-                            {/* AI Response - Only show if there is a response */}
-                            {item.response && (
-                              <div className="flex flex-col space-y-1">
-                                <div className="flex items-center space-x-2 justify-end">
-                                  <span className="text-sm text-gray-500 dark:text-gray-400">AI Assistant</span>
-                                  <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center">
-                                    <span className="text-sm font-medium text-white">AI</span>
-                                  </div>
-                                </div>
-                                <div className="mr-10 flex justify-end">
-                                  <div className="bg-blue-600 text-white rounded-lg px-4 py-2 max-w-[80%] break-words">
-                                    <div className="prose prose-invert max-w-none">
-                                      {item.response.split("\n").map((line, i) => {
-                                        // Check if line is a heading
-                                        if (line.startsWith("# ")) {
-                                          return (
-                                            <h1 key={i} className="text-xl font-bold mb-2">
-                                              {line.substring(2)}
-                                            </h1>
-                                          );
-                                        }
-                                        if (line.startsWith("## ")) {
-                                          return (
-                                            <h2 key={i} className="text-lg font-bold mb-2">
-                                              {line.substring(3)}
-                                            </h2>
-                                          );
-                                        }
-                                        if (line.startsWith("### ")) {
-                                          return (
-                                            <h3 key={i} className="text-base font-bold mb-2">
-                                              {line.substring(4)}
-                                            </h3>
-                                          );
-                                        }
-                                        // Check if line is a list item
-                                        if (line.startsWith("- ")) {
-                                          return (
-                                            <li key={i} className="ml-4">
-                                              {line.substring(2)}
-                                            </li>
-                                          );
-                                        }
-                                        if (line.startsWith("* ")) {
-                                          return (
-                                            <li key={i} className="ml-4">
-                                              {line.substring(2)}
-                                            </li>
-                                          );
-                                        }
-                                        // Check if line is a code block
-                                        if (line.startsWith("```") && line.length > 3) {
-                                          return (
-                                            <pre
-                                              key={i}
-                                              className="bg-blue-700 p-2 rounded my-2 overflow-x-auto"
-                                            >
-                                              {line.substring(3)}
-                                            </pre>
-                                          );
-                                        }
-                                        // Regular paragraph
-                                        return (
-                                          <p key={i} className="mb-2">
-                                            {line}
-                                          </p>
-                                        );
-                                      })}
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
                           </div>
-                        ))}
-
-                        {loading && <LoadingIndicator />}
-                      </>
-                    ) : (
-                      <div className="space-y-3">
-                        {chatHistory.length === 0 ? (
-                          <p className="text-sm text-gray-500 dark:text-gray-400">
-                            No chat history yet.
-                          </p>
-                        ) : (
-                          chatHistory
-                            .slice()
-                            .reverse()
-                            .map((item, index) => (
-                              <details
-                                key={index}
-                                className="group border border-gray-200 dark:border-gray-700 rounded-lg p-3 bg-gray-50 dark:bg-gray-900"
-                              >
-                                <summary className="flex items-center justify-between cursor-pointer">
-                                  <div className="flex-1">
-                                    <p className="text-sm font-medium text-gray-900 dark:text-white">
-                                      {item.chat || "No message text"}
-                                    </p>
-                                    {item.createdAt && (
-                                      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                                        {new Date(item.createdAt).toLocaleString()}
-                                      </p>
-                                    )}
-                                  </div>
-                                  <div className="ml-4">
-                                    {item.isAsync ? (
-                                      <span
-                                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                                          item.status === "queued"
-                                            ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
-                                            : item.status === "processing" || item.status === "planning"
-                                            ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
-                                            : item.status === "completed"
-                                            ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-                                            : item.status === "error"
-                                            ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
-                                            : "bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200"
-                                        }`}
-                                      >
-                                        {item.status === "queued" && "Queued (async)"}
-                                        {item.status === "planning" && "Planning (async)"}
-                                        {item.status === "processing" && "Processing (async)"}
-                                        {item.status === "completed" && "Completed (async)"}
-                                        {item.status === "error" && "Error (async)"}
-                                        {!item.status && "Async"}
-                                      </span>
-                                    ) : (
-                                      item.status && (
-                                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">
-                                          Status: {item.status}
-                                        </span>
-                                      )
-                                    )}
-                                  </div>
-                                </summary>
-                                <div className="mt-3 space-y-2">
-                                  {item.response ? (
-                                    <div className="bg-blue-600 text-white rounded-lg px-3 py-2">
-                                      <div className="prose prose-invert max-w-none text-sm">
-                                        {item.response.split("\n").map((line, i) => {
-                                          if (line.startsWith("# ")) {
-                                            return (
-                                              <h1 key={i} className="text-xl font-bold mb-2">
-                                                {line.substring(2)}
-                                              </h1>
-                                            );
-                                          }
-                                          if (line.startsWith("## ")) {
-                                            return (
-                                              <h2 key={i} className="text-lg font-bold mb-2">
-                                                {line.substring(3)}
-                                              </h2>
-                                            );
-                                          }
-                                          if (line.startsWith("### ")) {
-                                            return (
-                                              <h3 key={i} className="text-base font-bold mb-2">
-                                                {line.substring(4)}
-                                              </h3>
-                                            );
-                                          }
-                                          if (line.startsWith("- ")) {
-                                            return (
-                                              <li key={i} className="ml-4">
-                                                {line.substring(2)}
-                                              </li>
-                                            );
-                                          }
-                                          if (line.startsWith("* ")) {
-                                            return (
-                                              <li key={i} className="ml-4">
-                                                {line.substring(2)}
-                                              </li>
-                                            );
-                                          }
-                                          if (line.startsWith("```") && line.length > 3) {
-                                            return (
-                                              <pre
-                                                key={i}
-                                                className="bg-blue-700 p-2 rounded my-2 overflow-x-auto"
-                                              >
-                                                {line.substring(3)}
-                                              </pre>
-                                            );
-                                          }
-                                          return (
-                                            <p key={i} className="mb-2">
-                                              {line}
-                                            </p>
-                                          );
-                                        })}
-                                      </div>
-                                    </div>
-                                  ) : (
-                                    <p className="text-xs text-gray-500 dark:text-gray-400">
-                                      No response yet. Current status:{" "}
-                                      {item.status || (item.isAsync ? "queued" : "unknown")}
-                                    </p>
-                                  )}
-                                </div>
-                              </details>
-                            ))
                         )}
                       </div>
+                    ))
+                  )}
+                  {loading && <LoadingIndicator />}
+                  <div ref={bottomRef} />
+                </div>
+              </div>
+
+              {/* Input Area */}
+              <div className="p-4 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t">
+                <div className="max-w-3xl mx-auto relative">
+                  <div className="absolute left-2 top-2.5 flex items-center gap-1">
+                    <Button
+                      variant={runAsync ? "secondary" : "ghost"}
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setRunAsync(!runAsync)}
+                      title="Toggle Async Mode"
+                    >
+                      <Zap className={`h-4 w-4 ${runAsync ? 'text-yellow-500' : 'text-muted-foreground'}`} />
+                    </Button>
+                  </div>
+                  <Input
+                    placeholder={runAsync ? "Describe long-running task..." : "Message Infra Assistant..."}
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && !loading && handleSend()}
+                    disabled={loading}
+                    className="pl-12 pr-12 py-6 rounded-full shadow-sm border-muted-foreground/20 focus-visible:ring-offset-2"
+                  />
+                  <div className="absolute right-2 top-1.5 flex items-center gap-1">
+                    {loading ? (
+                      <Button
+                        variant="destructive"
+                        size="icon"
+                        onClick={cancelStream}
+                        className="h-8 w-8 rounded-full"
+                        title="Cancel"
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    ) : (
+                      <Button
+                        onClick={handleSend}
+                        size="icon"
+                        disabled={loading || !message.trim()}
+                        className="h-8 w-8 rounded-full bg-gradient-to-r from-primary to-purple-600 hover:from-primary/90 hover:to-purple-600/90"
+                      >
+                        <Send className="h-4 w-4" />
+                      </Button>
                     )}
                   </div>
-
-                  <div className="flex flex-col gap-2 mt-auto">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <button
-                        onClick={() => setIsWebSearch(!isWebSearch)}
-                        className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm transition-colors duration-200 ${
-                          isWebSearch
-                            ? "bg-blue-600 text-white"
-                            : "bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600"
-                        }`}
-                      >
-                        <FaSearch className="w-4 h-4" />
-                        Web Search
-                      </button>
-                      <button
-                        onClick={() => setRunAsync(!runAsync)}
-                        className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm transition-colors duration-200 ${
-                          runAsync
-                            ? "bg-purple-600 text-white"
-                            : "bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600"
-                        }`}
-                      >
-                        <span
-                          className={`w-2 h-2 rounded-full ${
-                            runAsync
-                              ? "bg-green-300"
-                              : "bg-gray-400 dark:bg-gray-500"
-                          }`}
-                        />
-                        Async automation
-                      </button>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="text"
-                        className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder={
-                          isWebSearch
-                            ? "Search the web..."
-                            : runAsync
-                            ? "Describe the automation you want to run..."
-                            : "Type your message..."
-                        }
-                        value={message}
-                        onChange={(e) => setMessage(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !loading) handleSend();
-                        }}
-                        disabled={loading}
-                      />
-                      <button
-                        onClick={handleSend}
-                        disabled={loading}
-                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {loading ? (
-                          <div className="flex items-center space-x-2">
-                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                            <span>Sending...</span>
-                          </div>
-                        ) : isWebSearch ? (
-                          "Search"
-                        ) : (
-                          "Send"
-                        )}
-                      </button>
-                    </div>
-                  </div>
+                </div>
+                <div className="text-center mt-2">
+                  <p className="text-[10px] text-muted-foreground">
+                    Infra AI can make mistakes. Consider checking important information.
+                  </p>
                 </div>
               </div>
             </div>
           </main>
-
-          {/* Plan Modal */}
-          <dialog id="my_modal_1" className="modal">
-            <div className="modal-box bg-white dark:bg-gray-800 p-6 rounded-lg shadow-xl">
-              <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-4">Action Plan</h3>
-              <div className="space-y-4">
-                <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-                  <h4 className="text-sm font-medium text-gray-900 dark:text-white mb-2">
-                    Your Request:
-                  </h4>
-                  <p className="text-sm text-gray-700 dark:text-gray-300">
-                    {chatHistory.length > 0
-                      ? chatHistory[chatHistory.length - 1].chat
-                      : ""}
-                  </p>
-                </div>
-                <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-                  <h4 className="text-sm font-medium text-gray-900 dark:text-white mb-2">
-                    Proposed Plan:
-                  </h4>
-                  <ul className="list-disc list-inside space-y-2">
-                    {plan.map((item, index) => (
-                      <li
-                        key={index}
-                        className="text-sm text-gray-700 dark:text-gray-300"
-                      >
-                        {item}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-              <div className="flex justify-end gap-2 mt-6">
-                <form method="dialog" className="flex gap-2">
-                  <button
-                    className="px-4 py-2 bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-900 dark:text-white rounded-lg transition-colors duration-200"
-                    onClick={() => setPlan([])}
-                  >
-                    Close
-                  </button>
-                  <button
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors duration-200"
-                    onClick={handlePlanSubmit}
-                    type="button"
-                  >
-                    Accept
-                  </button>
-                </form>
-              </div>
-            </div>
-          </dialog>
         </div>
+
+        {/* Delete Confirmation Dialog */}
+        <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Delete Chat</DialogTitle>
+              <DialogDescription>
+                Are you sure you want to delete this chat? This action cannot be undone.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowDeleteDialog(false)}>Cancel</Button>
+              <Button variant="destructive" onClick={deleteSession}>Delete</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </SignedIn>
     </ClerkProvider>
   );
