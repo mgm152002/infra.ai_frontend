@@ -93,7 +93,7 @@ export default function SimplifiedCreds() {
     },
     email: {
       smtp_server: "smtp.gmail.com",
-      smtp_port: 587,
+      smtp_port: "587",
       sender_email: "",
       sender_password: "",
     },
@@ -122,12 +122,21 @@ export default function SimplifiedCreds() {
       const cachedEmail = localStorage.getItem('infra_email_creds');
 
       if (cachedSlack || cachedEmail) {
+        const parsedSlack = cachedSlack ? JSON.parse(cachedSlack) : null;
+        const parsedEmail = cachedEmail ? JSON.parse(cachedEmail) : null;
         setCredentials(prev => ({
           ...prev,
-          slack: cachedSlack ? JSON.parse(cachedSlack) : prev.slack,
-          email: cachedEmail ? JSON.parse(cachedEmail) : prev.email
+          slack: parsedSlack ? {
+            slack_bot_token: parsedSlack.slack_bot_token || "",
+            slack_channel: parsedSlack.slack_channel || ""
+          } : prev.slack,
+          email: parsedEmail ? {
+            smtp_server: parsedEmail.smtp_server || "smtp.gmail.com",
+            smtp_port: parsedEmail.smtp_port || 587,
+            sender_email: parsedEmail.sender_email || "",
+            sender_password: parsedEmail.sender_password || ""
+          } : prev.email
         }));
-        // If we have cached data, we can stop loading indicator for these immediately
         setLoadingStates(prev => ({
           ...prev,
           slack: !cachedSlack,
@@ -154,13 +163,14 @@ export default function SimplifiedCreds() {
             Accept: 'application/json',
           };
           return await Promise.allSettled([
-            axios.get('http://localhost:8000/integrations/prometheus/config', { headers }),
-            axios.get('http://localhost:8000/integrations/github/config', { headers }),
-            axios.get('http://localhost:8000/integrations/jira/config', { headers }),
-            axios.get('http://localhost:8000/integrations/pagerduty/config', { headers }),
-            axios.get('http://localhost:8000/integrations/datadog/config', { headers }),
-            axios.get(`http://localhost:8000/getSlackCredentials/${email}`, { headers }),
-            axios.get(`http://localhost:8000/getEmailCredentials/${email}`, { headers }),
+            axios.get('http://localhost:8000/integrations/prometheus/config', { headers }),  // [0] promRes
+            axios.get('http://localhost:8000/integrations/github/config', { headers }),      // [1] ghRes
+            axios.get('http://localhost:8000/integrations/jira/config', { headers }),        // [2] jiraRes
+            axios.get('http://localhost:8000/integrations/confluence/config', { headers }),  // [3] confRes
+            axios.get('http://localhost:8000/integrations/pagerduty/config', { headers }),   // [4] pdRes
+            axios.get('http://localhost:8000/integrations/datadog/config', { headers }),     // [5] ddRes
+            axios.get(`http://localhost:8000/getSlackCredentials/${email}`, { headers }),    // [6] slackRes
+            axios.get(`http://localhost:8000/getEmailCredentials/${email}`, { headers }),    // [7] emailRes
           ]);
         } catch (e) {
           console.error("Token/Integration fetch error", e);
@@ -176,22 +186,18 @@ export default function SimplifiedCreds() {
         const sshkeys = independentResults[1].status === 'fulfilled' ? independentResults[1].value : { data: {} };
         const snowkeys = independentResults[2].status === 'fulfilled' ? independentResults[2].value : { data: {} };
 
-        // Process Dependent Results (Integrations)
+        // Process Dependent Results — destructuring now matches the 8-item array above
         const integrationResults = Array.isArray(dependentResults) ? dependentResults : [];
         const [promRes, ghRes, jiraRes, confRes, pdRes, ddRes, slackRes, emailRes] = integrationResults;
 
-        const promConfig = promRes?.status === 'fulfilled' ? promRes.value.data?.response || null : null;
-        const githubConfig = ghRes?.status === 'fulfilled' ? ghRes.value.data?.response || null : null;
-        const jiraConfig = jiraRes?.status === 'fulfilled' ? jiraRes.value.data?.response || null : null;
-        const confluenceConfig = confRes?.status === 'fulfilled' ? confRes.value.data?.response || null : null;
-        const pagerdutyConfig = pdRes?.status === 'fulfilled' ? pdRes.value.data?.response || null : null;
-        const datadogConfig = ddRes?.status === 'fulfilled' ? ddRes.value.data?.response || null : null;
-        const slackConfig = slackRes?.status === 'fulfilled' ? slackRes.value.data || null : null;
-        const emailConfig = emailRes?.status === 'fulfilled' ? emailRes.value.data || null : null;
-
-        // Update LocalStorage with fresh data
-        if (slackConfig) localStorage.setItem('infra_slack_creds', JSON.stringify(slackConfig));
-        if (emailConfig) localStorage.setItem('infra_email_creds', JSON.stringify(emailConfig));
+        const promConfig      = promRes?.status === 'fulfilled'   ? promRes.value.data?.response      || null : null;
+        const githubConfig    = ghRes?.status === 'fulfilled'     ? ghRes.value.data?.response        || null : null;
+        const jiraConfig      = jiraRes?.status === 'fulfilled'   ? jiraRes.value.data?.response      || null : null;
+        const confluenceConfig= confRes?.status === 'fulfilled'   ? confRes.value.data?.response      || null : null;
+        const pagerdutyConfig = pdRes?.status === 'fulfilled'     ? pdRes.value.data?.response        || null : null;
+        const datadogConfig   = ddRes?.status === 'fulfilled'     ? ddRes.value.data?.response        || null : null;
+        const slackConfig     = slackRes?.status === 'fulfilled'  ? slackRes.value.data?.response     || null : null;
+        const emailConfig     = emailRes?.status === 'fulfilled'  ? emailRes.value.data?.response     || null : null;
 
         const creds = {
           aws: {
@@ -241,14 +247,14 @@ export default function SimplifiedCreds() {
             team_ids: pagerdutyConfig?.team_ids || "",
           },
           slack: {
-            slack_bot_token: slackConfig?.slack_bot_token || (cachedSlack ? JSON.parse(cachedSlack).slack_bot_token : ""),
-            slack_channel: slackConfig?.slack_channel || (cachedSlack ? JSON.parse(cachedSlack).slack_channel : ""),
+            slack_bot_token: slackConfig?.slack_bot_token || "",
+            slack_channel: slackConfig?.slack_channel || "",
           },
           email: {
-            smtp_server: emailConfig?.smtp_server || (cachedEmail ? JSON.parse(cachedEmail).smtp_server : "smtp.gmail.com"),
-            smtp_port: emailConfig?.smtp_port || (cachedEmail ? JSON.parse(cachedEmail).smtp_port : 587),
-            sender_email: emailConfig?.sender_email || (cachedEmail ? JSON.parse(cachedEmail).sender_email : ""),
-            sender_password: emailConfig?.sender_password || (cachedEmail ? JSON.parse(cachedEmail).sender_password : ""),
+            smtp_server: emailConfig?.smtp_server || (cachedEmail ? (JSON.parse(cachedEmail).smtp_server || "smtp.gmail.com") : "smtp.gmail.com"),
+            smtp_port: emailConfig?.smtp_port || (cachedEmail ? (JSON.parse(cachedEmail).smtp_port || 587) : 587),
+            sender_email: emailConfig?.sender_email || (cachedEmail ? (JSON.parse(cachedEmail).sender_email || "") : ""),
+            sender_password: emailConfig?.sender_password || (cachedEmail ? (JSON.parse(cachedEmail).sender_password || "") : ""),
           },
         };
 
@@ -311,7 +317,6 @@ export default function SimplifiedCreds() {
   };
 
   const saveDatadogConfig = () => saveOrUpdate('datadog', false, 'http://localhost:8000/integrations/datadog/config', { ...credentials.datadog }, 'Datadog config saved!');
-
   const saveGitHubConfig = () => saveOrUpdate('github', false, 'http://localhost:8000/integrations/github/config', { ...credentials.github }, 'GitHub config saved!');
   const saveJiraConfig = () => saveOrUpdate('jira', false, 'http://localhost:8000/integrations/jira/config', { ...credentials.jira }, 'Jira config saved!');
   const saveConfluenceConfig = () => saveOrUpdate('confluence', false, 'http://localhost:8000/integrations/confluence/config', { ...credentials.confluence }, 'Confluence config saved!');
@@ -444,7 +449,7 @@ export default function SimplifiedCreds() {
                           <div className="space-y-2">
                             <Label>Region</Label>
                             <Select
-                              value={credentials.aws.region}
+                              value={credentials.aws.region || "us-east-1"}
                               onValueChange={(value) => handleInputChange('aws', 'region', value)}
                             >
                               <SelectTrigger>
@@ -590,7 +595,7 @@ export default function SimplifiedCreds() {
                           <div className="space-y-2">
                             <Label>Authentication</Label>
                             <Select
-                              value={credentials.prometheus.auth_type}
+                              value={credentials.prometheus.auth_type || "none"}
                               onValueChange={(value) => handleInputChange('prometheus', 'auth_type', value)}
                             >
                               <SelectTrigger>
@@ -651,7 +656,7 @@ export default function SimplifiedCreds() {
                           <div className="space-y-2">
                             <Label>Site</Label>
                             <Input
-                              value={credentials.datadog.site}
+                              value={credentials.datadog.site || "datadoghq.com"}
                               onChange={(e) => handleInputChange('datadog', 'site', e.target.value)}
                               placeholder="datadoghq.com"
                             />
@@ -677,7 +682,7 @@ export default function SimplifiedCreds() {
                           <div className="space-y-2">
                             <Label>Base URL</Label>
                             <Input
-                              value={credentials.github.base_url}
+                              value={credentials.github.base_url || "https://api.github.com"}
                               onChange={(e) => handleInputChange('github', 'base_url', e.target.value)}
                               placeholder="https://api.github.com"
                             />
@@ -903,8 +908,8 @@ export default function SimplifiedCreds() {
                             <Label>SMTP Port</Label>
                             <Input
                               type="number"
-                              value={credentials.email.smtp_port}
-                              onChange={(e) => handleInputChange('email', 'smtp_port', parseInt(e.target.value))}
+                              value={String(credentials.email.smtp_port)}
+                              onChange={(e) => handleInputChange('email', 'smtp_port', String(e.target.value))}
                               placeholder="587"
                             />
                           </div>
@@ -940,7 +945,7 @@ export default function SimplifiedCreds() {
             </div>
           </main>
         </div>
-      </SignedIn >
-    </ClerkProvider >
+      </SignedIn>
+    </ClerkProvider>
   );
 }

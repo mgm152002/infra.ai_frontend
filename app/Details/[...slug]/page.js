@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, use } from 'react';
+import { useEffect, useState, use, useRef } from 'react';
 import axios from 'axios';
 import { useAuth } from '@clerk/nextjs';
 import { ClerkProvider, SignedIn, UserButton } from '@clerk/nextjs';
@@ -39,29 +39,119 @@ export default function IncidentDetails({ params }) {
   const [generatingProblem, setGeneratingProblem] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // Live execution stream state
+  const [liveToolStream, setLiveToolStream] = useState([]);
+  const [streamActive, setStreamActive] = useState(false);
+  const [streamDone, setStreamDone] = useState(false);
+  const streamEndRef = useRef(null);
+  const streamReaderRef = useRef(null);
   const { getToken } = useAuth();
   const router = useRouter();
+
+  // Auto-scroll live stream to bottom
+  useEffect(() => {
+    if (streamEndRef.current) {
+      streamEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [liveToolStream]);
+
+  // Connect to SSE stream when incident is in a processing state
+  useEffect(() => {
+    let incState = incidentDetails?.state || '';
+    const isProcessing = ['processing', 'inprogress', 'active', 'received'].includes(incState.toLowerCase());
+
+    if (!isProcessing || streamActive || streamDone) return;
+
+    let cancelled = false;
+    setStreamActive(true);
+
+    (async () => {
+      try {
+        await getToken({ template: 'auth_token' });
+        const response = await fetch(`/api/stream?incident=${encodeURIComponent(slug)}`, {
+          headers: { 'Accept': 'text/event-stream' }
+        });
+        if (!response.ok) { setStreamActive(false); return; }
+
+        const reader = response.body.getReader();
+        streamReaderRef.current = reader;
+        const decoder = new TextDecoder();
+
+        while (!cancelled) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          for (const line of chunk.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            const raw = line.slice(6);
+            if (raw === ': keep-alive') continue;
+            try {
+              const ev = JSON.parse(raw);
+              const d = ev.data || {};
+              const eventIncident = d.incident_number || d.incident_id || slug;
+              if (eventIncident !== slug) continue;
+              if (ev.type === 'tool_call') {
+                setLiveToolStream(prev => [
+                  ...prev,
+                  {
+                    tool: d.tool,
+                    status: d.status,
+                    message: d.message || d.output || `Tool: ${d.tool}`,
+                    args: d.args,
+                    output: d.output,
+                    ts: new Date().toLocaleTimeString()
+                  }
+                ]);
+              } else if (ev.type === 'status_update') {
+                setIncidentDetails(prev => prev ? { ...prev, state: d.status || prev.state } : prev);
+              } else if (ev.type === 'incident_completed') {
+                setStreamDone(true);
+                setStreamActive(false);
+                // Refresh details and results after completion
+                fetchIncidentDetails(slug);
+                fetchResults(slug);
+                reader.cancel();
+                break;
+              }
+            } catch (e) { /* skip */ }
+          }
+        }
+        setStreamActive(false);
+      } catch (err) {
+        console.error('[Details SSE] error:', err);
+        setStreamActive(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (streamReaderRef.current) {
+        streamReaderRef.current.cancel();
+      }
+    };
+  }, [incidentDetails?.state]);
 
   // Enhanced markdown renderer with code blocks and better formatting
   const RCARenderer = ({ content }) => {
     if (!content) return null;
-    
+
     // Split content by main sections
     const lines = content.split('\n');
     const sections = [];
     let currentSection = { title: '', content: [], icon: null };
-    
+
     lines.forEach((line) => {
       // Detect section headers
       if (line.match(/^#{1,3}\s/)) {
         if (currentSection.content.length > 0 || currentSection.title) {
           sections.push(currentSection);
         }
-        
+
         // Determine icon based on section title
         let icon = <FileText className="h-5 w-5" />;
         const title = line.replace(/^#{1,3}\s/, '').toLowerCase();
-        
+
         if (title.includes('summary') || title.includes('overview')) {
           icon = <FileText className="h-5 w-5" />;
         } else if (title.includes('timeline') || title.includes('chronolog')) {
@@ -77,7 +167,7 @@ export default function IncidentDetails({ params }) {
         } else if (title.includes('lesson')) {
           icon = <Lightbulb className="h-5 w-5" />;
         }
-        
+
         currentSection = { title: line, content: [], icon };
       } else {
         currentSection.content.push(line);
@@ -86,7 +176,7 @@ export default function IncidentDetails({ params }) {
     if (currentSection.content.length > 0 || currentSection.title) {
       sections.push(currentSection);
     }
-    
+
     return (
       <div className="space-y-4">
         {sections.map((section, idx) => (
@@ -136,10 +226,10 @@ export default function IncidentDetails({ params }) {
   // Component to render bold and code in text
   const MarkdownLine = ({ text }) => {
     if (!text) return null;
-    
+
     // Split by ** for bold
     const parts = text.split(/(\*\*[^*]+\*\*)/g);
-    
+
     return (
       <>
         {parts.map((part, idx) => {
@@ -159,14 +249,72 @@ export default function IncidentDetails({ params }) {
     );
   };
 
+  const safeParseJson = (value, maxDepth = 3) => {
+    let current = value;
+    let depth = 0;
+    while (typeof current === "string" && depth < maxDepth) {
+      try {
+        current = JSON.parse(current);
+      } catch {
+        break;
+      }
+      depth += 1;
+    }
+    return current;
+  };
+
   const parseResultDescription = (description) => {
     if (!description) return null;
-    if (typeof description === 'object') return description;
-    try {
-      return JSON.parse(description);
-    } catch {
-      return null;
+    const parsed = safeParseJson(description);
+    return typeof parsed === "object" && parsed !== null ? parsed : null;
+  };
+
+  const parseStructuredField = (value) => {
+    if (!value) return null;
+    if (typeof value === "object") return value;
+    if (typeof value !== "string") return null;
+    const parsed = safeParseJson(value);
+    return typeof parsed === "object" && parsed !== null ? parsed : null;
+  };
+
+  const normalizeToolCalls = (parsed) => {
+    if (!parsed || typeof parsed !== "object") return [];
+    const candidates = [
+      parsed.tool_calls,
+      parsed.execution_stream,
+      parsed.tools,
+      parsed.result,
+      parsed.analysis?.tool_calls,
+      parsed.resolution?.tool_calls,
+    ];
+    const firstArray = candidates.find((entry) => Array.isArray(entry));
+    if (!firstArray) return [];
+
+    return firstArray.map((entry) => {
+      const toolObj = entry?.tool && typeof entry.tool === "object" ? entry.tool : null;
+      return {
+        name: entry?.name || toolObj?.name || entry?.tool || "tool",
+        status: entry?.status || toolObj?.status || "unknown",
+        args: entry?.args || toolObj?.args || null,
+        output: entry?.output ?? toolObj?.output ?? null,
+        timestamp: entry?.timestamp || entry?.ts || null,
+      };
+    });
+  };
+
+  const formatToolOutput = (value) => {
+    if (value === undefined || value === null) return "";
+    if (typeof value === "string") {
+      const parsed = safeParseJson(value);
+      if (typeof parsed === "object" && parsed !== null) {
+        return JSON.stringify(parsed, null, 2);
+      }
+      return value;
     }
+    if (typeof value === "object") {
+      return JSON.stringify(value, null, 2);
+    }
+    return String(value);
   };
 
   useEffect(() => {
@@ -332,9 +480,21 @@ export default function IncidentDetails({ params }) {
     );
   }
 
-  const description = incidentDetails?.description || "No description available.";
-  const cause = incidentDetails?.potential_cause || "No cause found.";
-  const solution = incidentDetails?.potential_solution || "No solution found.";
+  const structuredSolution = parseStructuredField(incidentDetails?.solution);
+  const description = incidentDetails?.description || incidentDetails?.short_description || "No description available.";
+  const cause =
+    incidentDetails?.potential_cause ||
+    structuredSolution?.root_cause ||
+    "No cause found.";
+  const solution =
+    incidentDetails?.potential_solution ||
+    (Array.isArray(structuredSolution?.resolution_steps)
+      ? structuredSolution.resolution_steps.join("\n")
+      : structuredSolution?.resolution_steps) ||
+    "No solution found.";
+  const incidentFieldEntries = Object.entries(incidentDetails || {}).filter(
+    ([key]) => key !== "potential_cause" && key !== "potential_solution"
+  );
 
   return (
     <ClerkProvider>
@@ -402,6 +562,31 @@ export default function IncidentDetails({ params }) {
                 </Card>
               </div>
 
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <FileText className="h-4 w-4 text-indigo-500" /> Incident Fields
+                  </CardTitle>
+                  <CardDescription>All persisted fields for this incident record.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {incidentFieldEntries.map(([key, value]) => (
+                      <div key={key} className="rounded-md border p-3 space-y-1">
+                        <p className="text-xs uppercase tracking-wide text-muted-foreground">{key}</p>
+                        {typeof value === "object" && value !== null ? (
+                          <pre className="text-xs whitespace-pre-wrap break-all bg-muted/50 rounded p-2">
+                            {JSON.stringify(value, null, 2)}
+                          </pre>
+                        ) : (
+                          <p className="text-sm break-all">{value === null || value === undefined ? "—" : String(value)}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+
               {/* RCA Section */}
               <div className="space-y-4">
                 <Card className="border-purple-200 dark:border-purple-900">
@@ -413,9 +598,9 @@ export default function IncidentDetails({ params }) {
                       <div className="flex gap-2">
                         {problemRecord ? (
                           <>
-                            <Button 
-                              size="sm" 
-                              variant="outline" 
+                            <Button
+                              size="sm"
+                              variant="outline"
                               className="gap-1 border-purple-300 text-purple-700 hover:bg-purple-100"
                               onClick={() => router.push(`/problems/${problemRecord.id}`)}
                             >
@@ -424,9 +609,9 @@ export default function IncidentDetails({ params }) {
                             </Button>
                             <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
                               <DialogTrigger asChild>
-                                <Button 
-                                  size="sm" 
-                                  variant="ghost" 
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
                                   className="text-red-500 hover:text-red-700 hover:bg-red-100"
                                   title="Delete Problem Record"
                                 >
@@ -453,10 +638,10 @@ export default function IncidentDetails({ params }) {
                             </Dialog>
                           </>
                         ) : rcaReport ? (
-                          <Button 
-                            size="sm" 
-                            variant="outline" 
-                            onClick={handleCreateProblem} 
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={handleCreateProblem}
                             disabled={generatingProblem}
                             className="border-purple-300 text-purple-700 hover:bg-purple-100"
                           >
@@ -506,6 +691,83 @@ export default function IncidentDetails({ params }) {
                 </Card>
               </div>
 
+              {/* Live Execution Stream Panel */}
+              {(liveToolStream.length > 0 || streamActive) && (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3">
+                    <h2 className="text-xl font-semibold tracking-tight">Execution Stream</h2>
+                    {streamActive && (
+                      <span className="flex items-center gap-1.5 px-2 py-0.5 text-xs font-semibold bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 rounded-full">
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse inline-block" />
+                        LIVE
+                      </span>
+                    )}
+                    {streamDone && (
+                      <span className="px-2 py-0.5 text-xs font-semibold bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300 rounded-full">
+                        ✓ Complete
+                      </span>
+                    )}
+                  </div>
+
+                  <Card className="overflow-hidden border-blue-200 dark:border-blue-900">
+                    <div className="max-h-[520px] overflow-y-auto p-4 space-y-2 bg-gray-950 dark:bg-black">
+                      {liveToolStream.length === 0 && streamActive && (
+                        <div className="flex items-center gap-3 text-sm text-gray-400 py-2">
+                          <Loader2 className="h-4 w-4 animate-spin text-blue-400" />
+                          <span>Waiting for AI agent to start…</span>
+                        </div>
+                      )}
+
+                      {liveToolStream.map((event, idx) => (
+                        <div
+                          key={idx}
+                          className={`rounded-lg border p-3 text-sm font-mono transition-all ${event.status === 'completed'
+                            ? 'border-green-800 bg-green-950/30'
+                            : event.status === 'failed'
+                              ? 'border-red-800 bg-red-950/30'
+                              : 'border-blue-800 bg-blue-950/20'
+                            }`}
+                        >
+                          <div className="flex items-center gap-2 mb-1">
+                            {event.status === 'running' ? (
+                              <Loader2 className="h-3.5 w-3.5 text-blue-400 animate-spin flex-shrink-0" />
+                            ) : event.status === 'completed' ? (
+                              <CheckCircle2 className="h-3.5 w-3.5 text-green-400 flex-shrink-0" />
+                            ) : (
+                              <XCircle className="h-3.5 w-3.5 text-red-400 flex-shrink-0" />
+                            )}
+                            <code className="text-xs px-1.5 py-0.5 bg-gray-800 text-blue-300 rounded">
+                              {event.tool}
+                            </code>
+                            <span className="text-xs text-gray-500 ml-auto">{event.ts}</span>
+                          </div>
+                          {event.message && (
+                            <p className="text-xs text-gray-300 ml-6 mb-1">{event.message}</p>
+                          )}
+                          {event.args && Object.keys(event.args).length > 0 && (
+                            <details className="ml-6 mt-1">
+                              <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-300">Args</summary>
+                              <pre className="mt-1 text-xs text-gray-400 bg-gray-900 rounded p-2 overflow-x-auto max-h-20">
+                                {JSON.stringify(event.args, null, 2)}
+                              </pre>
+                            </details>
+                          )}
+                          {event.output && (
+                            <details className="ml-6 mt-1">
+                              <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-300">Output</summary>
+                              <pre className="mt-1 text-xs text-gray-400 bg-gray-900 rounded p-2 overflow-x-auto max-h-28 whitespace-pre-wrap break-all">
+                                {formatToolOutput(event.output)}
+                              </pre>
+                            </details>
+                          )}
+                        </div>
+                      ))}
+                      <div ref={streamEndRef} />
+                    </div>
+                  </Card>
+                </div>
+              )}
+
               <div className="space-y-4">
                 <h2 className="text-xl font-semibold tracking-tight">Action Results</h2>
                 {results.length > 0 ? (
@@ -516,7 +778,7 @@ export default function IncidentDetails({ params }) {
                       const analysis = parsed?.analysis;
                       const resolution = parsed?.resolution;
                       const resolutionResults = resolution?.resolution_results || [];
-                      const knowledgeBase = parsed?.knowledge_base;
+                      const toolCalls = normalizeToolCalls(parsed);
                       const allResolutionSuccessful = resolutionResults.length > 0 && resolutionResults.every((step) => step.result?.success);
 
                       return (
@@ -634,6 +896,53 @@ export default function IncidentDetails({ params }) {
                                               <div className="mt-2 font-mono bg-black text-gray-50 p-2 rounded overflow-x-auto max-h-40">
                                                 {step.result?.output || step.result?.error}
                                               </div>
+                                            </details>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </details>
+                              </div>
+                            )}
+
+                            {/* Tool Calls */}
+                            {toolCalls.length > 0 && (
+                              <div className="w-full border rounded-lg">
+                                <details className="group">
+                                  <summary className="flex items-center cursor-pointer px-4 py-4 font-semibold hover:bg-muted/50 list-none">
+                                    <span className="flex items-center gap-2 flex-1">
+                                      <Terminal className="h-4 w-4" /> Tools Used ({toolCalls.length})
+                                    </span>
+                                    <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
+                                  </summary>
+                                  <div className="px-4 pb-4 border-t">
+                                    <div className="space-y-3 pt-4">
+                                      {toolCalls.map((tool, i) => (
+                                        <div key={i} className="border rounded-md p-3 bg-card text-sm space-y-2">
+                                          <div className="flex justify-between items-start gap-2">
+                                            <span className="font-medium break-all">{tool.name || tool.tool || "tool"}</span>
+                                            <Badge variant={(tool.status === "completed" || tool.status === "success") ? "default" : (tool.status === "failed" ? "destructive" : "secondary")}>
+                                              {tool.status || "unknown"}
+                                            </Badge>
+                                          </div>
+                                          {tool.timestamp && (
+                                            <p className="text-[11px] text-muted-foreground">{new Date(tool.timestamp).toLocaleString()}</p>
+                                          )}
+                                          {tool.args && (
+                                            <details className="text-xs">
+                                              <summary className="cursor-pointer text-primary hover:underline w-fit">Show Args</summary>
+                                              <pre className="mt-2 font-mono bg-black text-gray-50 p-2 rounded overflow-x-auto max-h-40 whitespace-pre-wrap break-all">
+                                                {JSON.stringify(tool.args, null, 2)}
+                                              </pre>
+                                            </details>
+                                          )}
+                                          {tool.output && (
+                                            <details className="text-xs">
+                                              <summary className="cursor-pointer text-primary hover:underline w-fit">Show Output</summary>
+                                              <pre className="mt-2 font-mono bg-black text-gray-50 p-2 rounded overflow-x-auto max-h-40 whitespace-pre-wrap break-all">
+                                                {formatToolOutput(tool.output)}
+                                              </pre>
                                             </details>
                                           )}
                                         </div>

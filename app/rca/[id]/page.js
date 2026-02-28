@@ -7,7 +7,7 @@ import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import { AlertTriangle, Trash2, ExternalLink, Loader2, Sparkles, ArrowLeft, BrainCircuit, Clock, CheckCircle, AlertCircle, Wrench, FileText, ListChecks, Target, Lightbulb, Shield } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { useAuth, ClerkProvider, SignedIn, UserButton } from '@clerk/nextjs';
+import { useAuth, ClerkProvider, SignedIn, SignedOut, RedirectToSignIn, UserButton } from '@clerk/nextjs';
 import { Sidebar, MobileSidebar } from "@/components/sidebar";
 import { ModeToggle } from "@/components/mode-toggle";
 import {
@@ -232,6 +232,9 @@ export default function RcaPage() {
 
     return (
         <ClerkProvider>
+            <SignedOut>
+                <RedirectToSignIn redirectUrl={`/rca/${id}`} />
+            </SignedOut>
             <SignedIn>
                 <div className="h-full relative">
                     <div className="hidden h-full md:flex md:w-72 md:flex-col md:fixed md:inset-y-0 z-80 bg-gray-900">

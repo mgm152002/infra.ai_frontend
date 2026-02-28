@@ -1,36 +1,116 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# Infra AI Frontend
 
-## Getting Started
+Next.js 15 frontend for incident operations, CMDB, credentials, chat-driven remediation, RCA, and admin workflows.
 
-First, run the development server:
+## What this project provides
+
+- Clerk-authenticated UI for Infra AI backend workflows
+- Incident dashboard with live progress and SSE-based updates
+- Incident detail, results, and RCA views
+- CMDB and service operations UI
+- Knowledge base and observability screens
+- Integrations and credentials management pages
+- Admin pages for users, alerts, approvals, and escalation rules
+
+## Tech stack
+
+- Next.js 15 (App Router)
+- React 19
+- Clerk authentication
+- Tailwind CSS + Radix UI
+- Axios and fetch-based API calls
+
+## Repository layout
+
+- `app/`: route-based UI pages
+- `app/api/`: server-side proxy routes
+  - `app/api/stream/route.js`: SSE stream proxy
+  - `app/api/execute/route.js`: incident execution stream proxy
+- `components/`: shared UI components
+- `lib/`: helper utilities
+- `middleware.js`: Clerk middleware
+
+## Prerequisites
+
+- Node.js 20+ recommended
+- Running backend API (default expected at `http://127.0.0.1:8000` or `http://localhost:8000`)
+- Clerk project with an `auth_token` template configured for backend JWT verification
+
+## Environment variables
+
+Create `.env.local` with at least:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=...
+CLERK_SECRET_KEY=...
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Optional backend routing vars used by API proxy fallback logic:
 
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+```bash
+API_INTERNAL_URL=http://127.0.0.1:8000
+BACKEND_URL=http://127.0.0.1:8000
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Notes:
 
-## Learn More
+- `next.config.mjs` rewrites `/api/:path*` to `http://localhost:8000/:path*`.
+- Some pages still call backend URLs directly using `localhost` or `127.0.0.1`, so backend must be reachable there unless you refactor those calls.
 
-To learn more about Next.js, take a look at the following resources:
+## Install and run
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+cd infra.ai_frontend\ copy
+npm install
+npm run dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+App URL:
 
-## Deploy on Vercel
+- `http://localhost:3000`
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Available scripts
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `npm run dev`: start dev server
+- `npm run dev:clean`: clear `.next` then start dev server
+- `npm run build`: production build
+- `npm run build:clean`: clean and build
+- `npm run start`: run production build
+- `npm run lint`: run lint checks
+
+## Important routes
+
+- `/dashboard`: incident list, creation, and live status
+- `/Details/[...slug]`: incident details and remediation outputs
+- `/chat`: assistant workflow
+- `/cmdb`: CMDB management
+- `/knowledge`: KB upload/search
+- `/creds`: credentials and integrations setup
+- `/rca`, `/rca/[id]`: RCA overview/details
+- `/admin/*`: admin workflows (users, alerts, approvals, escalation)
+
+## API proxy routes in this repo
+
+- `GET /api/stream?incident=<inc_number>`
+  - Proxies backend SSE stream endpoint with Clerk bearer token
+- `POST /api/execute`
+  - Proxies backend `/incident/stream` with Clerk bearer token
+
+## Build for production
+
+```bash
+npm run build
+npm run start
+```
+
+## Troubleshooting
+
+- If requests fail with `401`:
+  - verify Clerk keys
+  - verify JWT template name is `auth_token`
+- If stream/proxy endpoints fail:
+  - verify backend is running on configured URL(s)
+  - verify backend CORS/auth settings
+- If UI is stale:
+  - run `npm run dev:clean`
