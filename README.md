@@ -20,6 +20,37 @@ Next.js 15 frontend for incident operations, CMDB, credentials, chat-driven reme
 - Tailwind CSS + Radix UI
 - Axios and fetch-based API calls
 
+## Architecture overview
+
+The frontend acts as the operator console for the incident platform. It authenticates users with Clerk, sends requests to the backend, and renders live execution updates from SSE-backed workflows.
+
+```mermaid
+flowchart LR
+    Frontend["Frontend"] -->|"Chat request"| Backend["Main Backend"]
+    Backend -->|"SSE connection"| Frontend
+    EventGen["External Event Generator"] --> IncidentQueue["sqs_incident_queue"]
+    IncidentQueue -->|"Polling"| Backend
+    Backend -->|"enqueue chat_request"| ChatQueue["chat_queue"]
+    Backend -->|"enqueue incidents"| RMQ["RMQ"]
+    Backend <-->|"Pub/sub"| Redis["Redis"]
+    Backend --> Vault["Vault"]
+    Backend --> DB["DB"]
+    Worker1["Worker 1"] -->|"pub"| Redis
+    Worker2["Worker 2"] -->|"pub"| Redis
+    Worker3["Worker 3"] -->|"pub"| Redis
+    Vault --> Worker1
+    Vault --> Worker2
+    Vault --> Worker3
+    RMQ -->|"polling"| Worker3
+```
+
+### Frontend responsibilities
+
+- `Frontend` provides authenticated dashboards, chat, knowledge, CMDB, and admin workflows.
+- `app/api/stream` and `app/api/execute` proxy backend SSE traffic with Clerk-issued bearer tokens.
+- `Main Backend` handles orchestration, queue dispatch, persistence, and worker coordination.
+- `Redis`, `RMQ`, and SQS-backed queues support live job fan-out and asynchronous execution.
+
 ## Repository layout
 
 - `app/`: route-based UI pages
@@ -78,6 +109,8 @@ App URL:
 - `npm run build:clean`: clean and build
 - `npm run start`: run production build
 - `npm run lint`: run lint checks
+- `npm test`: run unit tests
+- `npm run format:check`: validate formatting for the shared proxy/helpers and tests
 
 ## Important routes
 
@@ -103,6 +136,29 @@ App URL:
 npm run build
 npm run start
 ```
+
+Container image:
+
+```bash
+docker build -t infra-ai-frontend .
+docker run -p 3000:3000 infra-ai-frontend
+```
+
+## Testing and delivery
+
+Local quality checks:
+
+```bash
+npm run format:check
+npm run lint
+npm test
+npm run build
+```
+
+GitHub Actions pipeline:
+
+- `quality` job installs dependencies, checks formatting, lints the app, runs Vitest, and verifies the production build.
+- `docker` job runs on pushes to `main` after the quality gate passes and publishes `ghcr.io/<owner>/infra-ai-frontend`.
 
 ## Troubleshooting
 
