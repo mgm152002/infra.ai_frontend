@@ -34,6 +34,8 @@ export default function KnowledgeBasePage() {
   const [activeTab, setActiveTab] = useState('docs');
   const [archFile, setArchFile] = useState(null);
   const [archUploading, setArchUploading] = useState(false);
+  const [archDocs, setArchDocs] = useState([]);
+  const [archLoading, setArchLoading] = useState(true);
 
   const fetchDocs = async () => {
     try {
@@ -63,8 +65,35 @@ export default function KnowledgeBasePage() {
     }
   };
 
+  const fetchArchDocs = async () => {
+    try {
+      setArchLoading(true);
+      const token = await getToken({ template: 'auth_token' });
+      if (!token) {
+        setArchLoading(false);
+        return;
+      }
+
+      const { data } = await axios.get(`${API_BASE_URL}/knowledge/architecture/docs`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+      });
+
+      const rows = data?.response?.data || [];
+      setArchDocs(rows);
+    } catch (error) {
+      console.error('Error fetching architecture documents:', error);
+    } finally {
+      setArchLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchDocs();
+    fetchArchDocs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -150,6 +179,7 @@ export default function KnowledgeBasePage() {
       if (input) {
         input.value = '';
       }
+      await fetchArchDocs();
     } catch (error) {
       console.error('Error uploading architecture knowledge document:', error);
       toast.error(error?.response?.data?.detail || 'Failed to upload architecture document');
@@ -184,6 +214,7 @@ export default function KnowledgeBasePage() {
 
       toast.success('Knowledge document deleted');
       setDocs((prev) => prev.filter((d) => d.doc_id !== docId));
+      setArchDocs((prev) => prev.filter((d) => d.doc_id !== docId));
     } catch (error) {
       console.error('Error deleting knowledge document:', error);
       toast.error(error?.response?.data?.detail || 'Failed to delete document');
@@ -413,6 +444,82 @@ export default function KnowledgeBasePage() {
                         <p className="mt-2 text-xs text-muted-foreground">
                           Selected: <span className="font-medium">{archFile.name}</span>
                         </p>
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  {/* Architecture documents table */}
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Indexed architecture documents</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      {archLoading ? (
+                        <div className="flex justify-center items-center py-8">
+                          <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+                        </div>
+                      ) : archDocs.length === 0 ? (
+                        <p className="text-sm text-muted-foreground py-4">
+                          No architecture documents indexed yet. Upload one above to get started.
+                        </p>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-border">
+                            <thead className="bg-muted/50">
+                              <tr>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                  File name
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                  Document ID
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                  Chunks
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                  Index
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                  Created at
+                                </th>
+                                <th className="px-4 py-3 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                  Actions
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-border bg-card">
+                              {archDocs.map((doc) => (
+                                <tr key={doc.id || doc.doc_id} className="hover:bg-muted/50">
+                                  <td className="px-4 py-3 text-sm font-medium">
+                                    {doc.source_file_name || '—'}
+                                  </td>
+                                  <td className="px-4 py-3 text-sm font-mono text-muted-foreground">
+                                    {doc.doc_id}
+                                  </td>
+                                  <td className="px-4 py-3 text-sm text-muted-foreground">
+                                    {doc.chunks_indexed ?? '—'}
+                                  </td>
+                                  <td className="px-4 py-3 text-sm text-muted-foreground">
+                                    {doc.index_name || 'infraai'}
+                                  </td>
+                                  <td className="px-4 py-3 text-sm text-muted-foreground">
+                                    {formatDate(doc.created_at)}
+                                  </td>
+                                  <td className="px-4 py-3 text-sm text-right">
+                                    <Button
+                                      variant="destructive"
+                                      size="sm"
+                                      onClick={() => confirmDelete(doc.doc_id)}
+                                      disabled={deletingId === doc.doc_id}
+                                    >
+                                      {deletingId === doc.doc_id ? 'Deleting...' : 'Delete'}
+                                    </Button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
                       )}
                     </CardContent>
                   </Card>
