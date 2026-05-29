@@ -53,12 +53,16 @@ flowchart LR
 
 ## Repository layout
 
-- `app/`: route-based UI pages
-- `app/api/`: server-side proxy routes
+- `app/`: Next.js App Router pages for dashboard, incident details, chat, CMDB, credentials, integrations, knowledge, observability, problems, RCA, services, and admin workflows
+- `app/api/`: server-side proxy routes and shared backend URL helper
+  - `app/api/_lib/backend.js`: backend URL resolution helper
   - `app/api/stream/route.js`: SSE stream proxy
   - `app/api/execute/route.js`: incident execution stream proxy
-- `components/`: shared UI components
+- `components/`: shared shell/theme components
+- `components/ui/`: reusable Radix/Tailwind UI primitives
 - `lib/`: helper utilities
+- `public/`: static assets
+- `tests/`: Vitest suites for API routes, components, and library helpers
 - `middleware.js`: Clerk middleware
 
 ## Prerequisites
@@ -92,7 +96,7 @@ Notes:
 ## Install and run
 
 ```bash
-cd infra.ai_frontend\ copy
+cd infra-ai-frontend
 npm install
 npm run dev
 ```
