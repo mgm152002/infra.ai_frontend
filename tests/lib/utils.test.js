@@ -31,6 +31,6 @@ describe("cn utility", () => {
   });
 
   it("handles object inputs", () => {
-    expect(cn({ "px-4": true, "hidden": false })).toBe("px-4");
+    expect(cn({ "px-4": true, hidden: false })).toBe("px-4");
   });
 });
